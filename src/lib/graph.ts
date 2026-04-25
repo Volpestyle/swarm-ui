@@ -47,13 +47,14 @@ export function buildGraph(
   locks: Lock[],
   bindings: BindingState,
   savedLayout?: Record<string, Position>,
+  defaultNodeSize: NodeSize = DEFAULT_NODE_SIZE,
 ): { nodes: XYFlowNode[]; edges: XYFlowEdge[] } {
   // Build lookup sets for binding resolution
   const resolvedInstanceIds = new Set<string>();
   const resolvedPtyIds = new Set<string>();
 
   for (const [instanceId, ptyId] of bindings.resolved) {
-    if (!instances.has(instanceId)) continue;
+    if (!instances.has(instanceId) || !ptySessions.has(ptyId)) continue;
     resolvedInstanceIds.add(instanceId);
     resolvedPtyIds.add(ptyId);
   }
@@ -73,6 +74,7 @@ export function buildGraph(
   for (const [instanceId, ptyId] of bindings.resolved) {
     const instance = instances.get(instanceId) ?? null;
     const pty = ptySessions.get(ptyId) ?? null;
+    if (!instance || !pty) continue;
     const nodeId = `bound:${instanceId}`;
 
     nodes.push(makeNode(nodeId, 'bound', instance, pty, {
@@ -81,6 +83,7 @@ export function buildGraph(
       requestedTasks: tasksByRequester.get(instanceId) ?? [],
       savedLayout,
       autoIndex: autoIndex++,
+      defaultNodeSize,
     }));
   }
 
@@ -95,6 +98,7 @@ export function buildGraph(
       requestedTasks: tasksByRequester.get(id) ?? [],
       savedLayout,
       autoIndex: autoIndex++,
+      defaultNodeSize,
     }));
   }
 
@@ -110,6 +114,7 @@ export function buildGraph(
       requestedTasks: [],
       savedLayout,
       autoIndex: autoIndex++,
+      defaultNodeSize,
     }));
   }
 
@@ -141,7 +146,18 @@ interface MakeNodeOpts {
   requestedTasks: Task[];
   savedLayout?: Record<string, Position>;
   autoIndex: number;
+  defaultNodeSize: NodeSize;
 }
+
+interface NodeSize {
+  width: number;
+  height: number;
+}
+
+const DEFAULT_NODE_SIZE: NodeSize = {
+  width: 960,
+  height: 720,
+};
 
 function makeNode(
   nodeId: string,
@@ -181,8 +197,8 @@ function makeNode(
     // driven updates to width/height persist across reactive graph rebuilds.
     // Keeping these as discrete numeric props (not a `style` string with
     // hardcoded width/height) lets NodeResizer author the DOM size cleanly.
-    width: preferredSize?.width ?? 760,
-    height: preferredSize?.height ?? 620,
+    width: preferredSize?.width ?? opts.defaultNodeSize.width,
+    height: preferredSize?.height ?? opts.defaultNodeSize.height,
   };
 }
 

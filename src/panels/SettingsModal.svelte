@@ -2,6 +2,13 @@
   import { createEventDispatcher } from 'svelte';
   import { appearance } from '../stores/appearance';
   import {
+    agentWindowSettings,
+    AGENT_WINDOW_HEIGHT_MAX,
+    AGENT_WINDOW_HEIGHT_MIN,
+    AGENT_WINDOW_WIDTH_MAX,
+    AGENT_WINDOW_WIDTH_MIN,
+  } from '../stores/agentWindowSettings';
+  import {
     harnessAliases,
     HARNESS_NAMES,
     type HarnessName,
@@ -18,6 +25,21 @@
     appearance.setBackgroundOpacity(Number(target.value) / 100);
   }
 
+  function handleAgentWindowWidthInput(event: Event) {
+    const target = event.currentTarget as HTMLInputElement;
+    agentWindowSettings.setDefaultWidth(Number(target.value));
+  }
+
+  function handleAgentWindowHeightInput(event: Event) {
+    const target = event.currentTarget as HTMLInputElement;
+    agentWindowSettings.setDefaultHeight(Number(target.value));
+  }
+
+  function handleCenterOnSpawnInput(event: Event) {
+    const target = event.currentTarget as HTMLInputElement;
+    agentWindowSettings.setCenterOnSpawn(target.checked);
+  }
+
   function handleAliasInput(harness: HarnessName, event: Event) {
     const target = event.currentTarget as HTMLInputElement;
     harnessAliases.setAlias(harness, target.value);
@@ -25,6 +47,7 @@
 
   function resetDefaults() {
     appearance.reset();
+    agentWindowSettings.reset();
     harnessAliases.reset();
   }
 
@@ -71,6 +94,66 @@
               step="1"
               value={Math.round($appearance.backgroundOpacity * 100)}
               on:input={handleBackgroundOpacityInput}
+            />
+          </div>
+        </div>
+      </section>
+
+      <section class="agent-window-section">
+        <h3>Agent Windows</h3>
+
+        <div class="setting-row">
+          <div class="setting-copy">
+            <label for="settings-agent-window-width">Default Width</label>
+            <p>Applied to newly spawned agent windows.</p>
+          </div>
+
+          <div class="setting-control">
+            <span class="setting-value">{$agentWindowSettings.defaultWidth}px</span>
+            <input
+              id="settings-agent-window-width"
+              type="range"
+              min={AGENT_WINDOW_WIDTH_MIN}
+              max={AGENT_WINDOW_WIDTH_MAX}
+              step="20"
+              value={$agentWindowSettings.defaultWidth}
+              on:input={handleAgentWindowWidthInput}
+            />
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-copy">
+            <label for="settings-agent-window-height">Default Height</label>
+            <p>Applied to newly spawned agent windows.</p>
+          </div>
+
+          <div class="setting-control">
+            <span class="setting-value">{$agentWindowSettings.defaultHeight}px</span>
+            <input
+              id="settings-agent-window-height"
+              type="range"
+              min={AGENT_WINDOW_HEIGHT_MIN}
+              max={AGENT_WINDOW_HEIGHT_MAX}
+              step="20"
+              value={$agentWindowSettings.defaultHeight}
+              on:input={handleAgentWindowHeightInput}
+            />
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-copy">
+            <label for="settings-center-on-spawn">Center On Spawn</label>
+            <p>Pan to newly spawned agent windows after launch.</p>
+          </div>
+
+          <div class="setting-control checkbox-control">
+            <input
+              id="settings-center-on-spawn"
+              type="checkbox"
+              checked={$agentWindowSettings.centerOnSpawn}
+              on:change={handleCenterOnSpawnInput}
             />
           </div>
         </div>
@@ -182,6 +265,7 @@
     gap: 14px;
   }
 
+  .agent-window-section,
   .harness-section {
     margin-top: 20px;
   }
@@ -273,6 +357,15 @@
     margin: 0;
     accent-color: var(--status-pending, #89b4fa);
     cursor: pointer;
+  }
+
+  .checkbox-control {
+    align-items: flex-end;
+  }
+
+  .checkbox-control input[type='checkbox'] {
+    width: 18px;
+    height: 18px;
   }
 
   .setting-value {

@@ -22,6 +22,7 @@
     requestNodeWorkspace,
     toggleCompactNode,
   } from '../lib/app/nodeWindowState';
+  import { requestNodeCanvasFillToggle } from '../lib/app/focus';
   import NodeHeader from './NodeHeader.svelte';
   import TerminalPane from './TerminalPane.svelte';
   import '../styles/terminal.css';
@@ -82,6 +83,11 @@
     if (!ptyId) return;
     handleInspect();
     requestNodeWorkspace(id);
+  }
+
+  function handleFillCanvas() {
+    handleInspect();
+    requestNodeCanvasFillToggle(id);
   }
 
   function sideToPosition(side: string): Position {
@@ -153,6 +159,7 @@
     on:focus={handleFocus}
     on:compact={handleCompact}
     on:fullscreen={handleFullscreen}
+    on:fillCanvas={handleFillCanvas}
   />
 
   {#if compact}

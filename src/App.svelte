@@ -83,6 +83,8 @@
     resolveSidebarWidth,
   } from './lib/app/sidebar';
   import { workspaceOverlayActive } from './lib/workspaceOverlay';
+  import { requestNodeCanvasFillToggle } from './lib/app/focus';
+  import { agentWindowSettings } from './stores/agentWindowSettings';
   import {
     disposeAllTerminalSurfaces,
     getTerminalSurface,
@@ -408,6 +410,10 @@
       $locks,
       $bindings,
       $savedLayout,
+      {
+        width: $agentWindowSettings.defaultWidth,
+        height: $agentWindowSettings.defaultHeight,
+      },
     ),
   );
 
@@ -628,11 +634,28 @@
           }
         }
 
+        const wantsCanvasFill =
+          meta &&
+          !event.shiftKey &&
+          event.altKey &&
+          (event.key.toLowerCase() === 'f' || event.code === 'KeyF');
+
+        if (wantsCanvasFill && !overlayOpen) {
+          const nodeId = resolveNodeTargetId(event, selectedNodeId);
+          if (nodeId && findNodeById(nodes, nodeId)) {
+            event.preventDefault();
+            event.stopPropagation();
+            setSelectedNode(nodeId);
+            requestNodeCanvasFillToggle(nodeId);
+            return;
+          }
+        }
+
         const wantsFullscreen =
           meta &&
           event.shiftKey &&
           !event.altKey &&
-          event.key.toLowerCase() === 'f';
+          (event.key.toLowerCase() === 'f' || event.code === 'KeyF');
 
         if (wantsFullscreen) {
           const nodeId = resolveFullscreenTargetId(
@@ -734,7 +757,7 @@
         maskColor="rgba(0, 0, 0, 0.7)"
         style="background: var(--node-header-bg); border: 1px solid var(--node-border); border-radius: 6px;"
       />
-      <ViewportFocus />
+      <ViewportFocus rightInset={effectiveSidebarWidth} />
     </SvelteFlow>
 
     <!-- Status bar overlays the canvas bottom-center -->

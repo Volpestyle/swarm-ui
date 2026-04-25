@@ -19,6 +19,7 @@
     unboundPtySessions,
   } from '../stores/pty';
   import { requestNodeFocus } from '../lib/app/focus';
+  import { agentWindowSettings } from '../stores/agentWindowSettings';
 
   // Persisted last-used values so users don't retype the same cwd every
   // launch. Keys are namespaced for future settings.
@@ -143,14 +144,16 @@
       label = '';
       name = '';
 
-      // Ask the canvas to pan to the new node so it doesn't get lost among
-      // the accumulated offline/adopting zombies. Matches the node id that
-      // graph.ts will emit: `bound:<id>` when the pre-created instance row
-      // comes back, else `pty:<id>` for plain shells with no swarm identity.
-      const focusNodeId = result.instance_id
-        ? `bound:${result.instance_id}`
-        : `pty:${result.pty_id}`;
-      requestNodeFocus(focusNodeId);
+      if ($agentWindowSettings.centerOnSpawn) {
+        // Ask the canvas to pan to the new node so it doesn't get lost among
+        // the accumulated offline/adopting zombies. Matches the node id that
+        // graph.ts will emit: `bound:<id>` when the pre-created instance row
+        // comes back, else `pty:<id>` for plain shells with no swarm identity.
+        const focusNodeId = result.instance_id
+          ? `bound:${result.instance_id}`
+          : `pty:${result.pty_id}`;
+        requestNodeFocus(focusNodeId);
+      }
 
       return true;
     } catch (err) {

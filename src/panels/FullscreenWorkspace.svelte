@@ -28,8 +28,8 @@
   let shellElement: HTMLDivElement | null = null;
   let paneARef: TerminalPane | null = null;
   let paneBRef: TerminalPane | null = null;
-  let shellVisible = false;
-  let backdropVisible = false;
+  let shellVisible = true;
+  let backdropVisible = true;
   let mounted = false;
   let transitionPhase: 'opening' | 'closing' | null = null;
   let transitionFallbackTimer: ReturnType<typeof setTimeout> | null = null;
@@ -37,7 +37,7 @@
   let loadingVisible = false;
 
   let layout: 'single' | 'split' = 'single';
-  let paneANodeId: string | null = null;
+  let paneANodeId: string | null = initialNodeId;
   let paneBNodeId: string | null = null;
   let focusedPane: PaneId = 'a';
   let tabMru: string[] = [];
@@ -46,12 +46,15 @@
   let readyPaneAKey: string | null = null;
   let readyPaneBKey: string | null = null;
 
-  const SHELL_TRANSITION_MS = 220;
+  const SHELL_TRANSITION_MS = 120;
   const TRANSITION_FALLBACK_MS = SHELL_TRANSITION_MS + 80;
-  const LOADING_OVERLAY_DELAY_MS = 140;
+  const LOADING_OVERLAY_DELAY_MS = 600;
 
   $: tabs = deriveTabs(nodes);
   $: tabIds = tabs.map((tab) => tab.id);
+  $: if (!mounted && !paneANodeId && initialNodeId) {
+    paneANodeId = initialNodeId;
+  }
   $: reconcilePanes(tabIds);
   $: trackMru(focusedPane === 'a' ? paneANodeId : paneBNodeId);
   $: nodesById = new Map(nodes.map((node) => [node.id, node]));
@@ -89,20 +92,17 @@
     mounted = true;
 
     document.addEventListener('keydown', handleKeyDown, true);
+    void tick().then(() => {
+      if (stage === 'opening') {
+        dispatch('opened');
+      }
+    });
 
     return () => {
       document.removeEventListener('keydown', handleKeyDown, true);
       clearTransitionFallback();
       clearLoadingDelay();
     };
-  });
-
-  onMount(() => {
-    void tick().then(() => {
-      requestAnimationFrame(() => {
-        startOpeningTransition();
-      });
-    });
   });
 
   onDestroy(() => {
@@ -209,13 +209,6 @@
     }, TRANSITION_FALLBACK_MS);
   }
 
-  function startOpeningTransition(): void {
-    transitionPhase = 'opening';
-    backdropVisible = true;
-    shellVisible = true;
-    scheduleTransitionFallback('opening');
-  }
-
   function startClosingTransition(): void {
     transitionPhase = 'closing';
     backdropVisible = false;
@@ -263,6 +256,13 @@
     }
 
     if (!event.shiftKey) return;
+
+    if (!event.altKey && (event.key.toLowerCase() === 'f' || event.code === 'KeyF')) {
+      event.preventDefault();
+      event.stopPropagation();
+      requestClose();
+      return;
+    }
 
     if (event.key === '\\' || event.code === 'Backslash') {
       event.preventDefault();
@@ -616,7 +616,7 @@
       radial-gradient(circle at 20% 0%, rgba(137, 180, 250, 0.08), transparent 38%),
       rgba(11, 11, 17, 0.22);
     opacity: 0;
-    transition: opacity 180ms ease;
+    transition: opacity 100ms ease;
   }
 
   .workspace-backdrop.visible {
@@ -638,8 +638,8 @@
     opacity: 0;
     transform: translate3d(0, 12px, 0) scale(0.985);
     transition:
-      opacity 180ms ease,
-      transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+      opacity 100ms ease,
+      transform 120ms cubic-bezier(0.22, 1, 0.36, 1);
     pointer-events: auto;
     will-change: opacity, transform;
   }
