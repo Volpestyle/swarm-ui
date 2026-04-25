@@ -409,14 +409,12 @@
       $bindings,
       $savedLayout,
     ),
-    $savedLayout,
   );
 
   function applyBuild(
     built: { nodes: XYFlowNode[]; edges: XYFlowEdge[] },
-    persistedLayout: Record<string, Position>,
   ) {
-    nodes = mergeNodes(nodes, built.nodes, persistedLayout);
+    nodes = mergeNodes(nodes, built.nodes);
     applyCompactNodeGeometry();
     edges = mergeEdges(edges, built.edges);
   }

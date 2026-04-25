@@ -1,15 +1,16 @@
-import type { Position, XYFlowEdge, XYFlowNode } from '../types';
+import type { XYFlowEdge, XYFlowNode } from '../types';
 
 const mobileRestoreSizes = new Map<string, { width?: number; height?: number }>();
 
 /**
  * Preserve XYFlow-owned node fields across semantic graph rebuilds.
- * Persisted layout positions from the backend win over in-memory positions.
+ * Persisted layout is already applied by `buildGraph` for fresh nodes; once a
+ * node exists locally, the in-memory XYFlow position must win so background
+ * state updates don't rubber-band an active drag back to stale saved layout.
  */
 export function mergeNodes(
   existing: XYFlowNode[],
   next: XYFlowNode[],
-  persistedLayout: Record<string, Position>,
 ): XYFlowNode[] {
   const byId = new Map(existing.map((node) => [node.id, node]));
   return next.map((fresh) => {
@@ -39,9 +40,6 @@ export function mergeNodes(
       merged.height = fresh.height;
     }
 
-    if (persistedLayout[fresh.id]) {
-      merged.position = fresh.position;
-    }
     return merged;
   });
 }
