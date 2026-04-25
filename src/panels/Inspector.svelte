@@ -7,17 +7,20 @@
   - Scrollable content area with close button to deselect
 -->
 <script lang="ts">
+  import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import type {
     Annotation,
     Event,
+    Instance,
     KvEntry,
+    Task,
     SwarmNodeData,
     ConnectionEdgeData,
     XYFlowNode,
     XYFlowEdge,
   } from '../lib/types';
-  import { formatTimestamp } from '../lib/time';
+  import { formatRelative, formatTimestamp, timestampToMillis } from '../lib/time';
   import { isSystemMessage } from '../lib/messages';
   import { buildTaskTree, type TaskTreeRow } from '../lib/tasks';
   import Markdown from '../lib/Markdown.svelte';
@@ -198,8 +201,9 @@
   }
 
   // -------------------------------------------------------------------
-  // Activity section. Filter chips for the five event categories;
-  // selected scope filters by event.scope to match KV/Context behavior.
+  // Activity section. Filter chips for the five event categories; when
+  // a node or edge is selected, also restrict to events whose actor or
+  // subject is one of the selected instance ids.
   // -------------------------------------------------------------------
 
   type EventCategory = 'message' | 'task' | 'kv' | 'context' | 'instance';
@@ -212,11 +216,38 @@
     { id: 'instance', label: 'instances', color: '#a6adc8' },
   ];
 
+  // Heartbeat thresholds mirror the server's `STALE` / offline cutoffs in
+  // src/registry.ts (30s / 60s). Used by the liveness header below.
+  const STALE_AFTER_MS = 30_000;
+  const OFFLINE_AFTER_MS = 60_000;
+
+  // Ring-buffer cap used by stores/swarm.ts. Surfaced in the UI when the
+  // buffer is full so users know history is being dropped.
+  const EVENTS_BUFFER_CAP = 500;
+
   let activityCollapsed = false;
   let activityFilter: Set<EventCategory> = new Set(
     ACTIVITY_CATEGORIES.map((c) => c.id),
   );
   let expandedEventIds = new Set<number>();
+
+  // Tick driving relative-time labels and liveness staleness. Cheap reactive
+  // dependency so timestamp-derived strings refresh without churning the
+  // event store. Matches the pattern used in PairingSessionModal.
+  let nowMs = Date.now();
+  let nowTimer: ReturnType<typeof setInterval> | null = null;
+  onMount(() => {
+    nowMs = Date.now();
+    nowTimer = setInterval(() => {
+      nowMs = Date.now();
+    }, 5_000);
+  });
+  onDestroy(() => {
+    if (nowTimer) {
+      clearInterval(nowTimer);
+      nowTimer = null;
+    }
+  });
 
   function categoryOf(type: string): EventCategory | null {
     if (type.startsWith('message.')) return 'message';
@@ -234,18 +265,57 @@
     activityFilter = next;
   }
 
-  $: visibleEvents = filterEvents($eventsStore, activityFilter, selectedScope);
+  function resetActivityFilters(): void {
+    activityFilter = new Set(ACTIVITY_CATEGORIES.map((c) => c.id));
+  }
+
+  // Selected actors: when a node is selected we narrow to its instance id;
+  // when an edge is selected we narrow to both endpoints. Empty set means
+  // "no actor narrowing" (global scope-level view).
+  $: selectedActors = deriveSelectedActors(nodeData, edgeData);
+
+  function deriveSelectedActors(
+    node: SwarmNodeData | null,
+    edge: ConnectionEdgeData | null,
+  ): Set<string> {
+    const ids = new Set<string>();
+    if (node?.instance?.id) ids.add(node.instance.id);
+    if (edge?.sourceInstanceId) ids.add(edge.sourceInstanceId);
+    if (edge?.targetInstanceId) ids.add(edge.targetInstanceId);
+    return ids;
+  }
+
+  $: scopeMatchedEvents = filterEvents(
+    $eventsStore,
+    activityFilter,
+    selectedScope,
+    selectedActors,
+  );
+  $: scopeMatchedCount = filterEvents(
+    $eventsStore,
+    new Set(ACTIVITY_CATEGORIES.map((c) => c.id)),
+    selectedScope,
+    selectedActors,
+  ).length;
+  $: visibleEvents = scopeMatchedEvents;
+  $: bufferFull = $eventsStore.length >= EVENTS_BUFFER_CAP;
 
   function filterEvents(
     rows: Event[],
     chips: Set<EventCategory>,
     scope: string | null,
+    actors: Set<string>,
   ): Event[] {
     const out: Event[] = [];
     for (const row of rows) {
       if (scope && row.scope !== scope) continue;
       const cat = categoryOf(row.type);
       if (!cat || !chips.has(cat)) continue;
+      if (actors.size > 0) {
+        const actorMatch = row.actor !== null && actors.has(row.actor);
+        const subjectMatch = row.subject !== null && actors.has(row.subject);
+        if (!actorMatch && !subjectMatch) continue;
+      }
       out.push(row);
     }
     // Newest first — store keeps the natural append order.
@@ -271,20 +341,189 @@
     return value.length > 12 ? value.slice(0, 8) : value;
   }
 
-  function eventSummary(evt: Event): string {
-    if (!evt.payload) return '';
+  function basename(path: string): string {
+    const trimmed = path.replace(/\/+$/, '');
+    const idx = trimmed.lastIndexOf('/');
+    return idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
+  }
+
+  function truncate(value: string, max: number): string {
+    return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+  }
+
+  type ParsedPayload = Record<string, unknown> | null;
+
+  function parsePayload(raw: string | null): ParsedPayload {
+    if (!raw) return null;
     try {
-      const parsed = JSON.parse(evt.payload);
-      if (parsed && typeof parsed === 'object') {
-        const obj = parsed as Record<string, unknown>;
-        if (typeof obj.status === 'string') return `→ ${obj.status}`;
-        if (typeof obj.title === 'string') return obj.title.slice(0, 40);
-        if (typeof obj.recipients === 'number') return `${obj.recipients} recipient(s)`;
-        if (typeof obj.length === 'number') return `len ${obj.length}`;
-      }
-      return '';
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object'
+        ? (parsed as Record<string, unknown>)
+        : null;
     } catch {
-      return evt.payload.slice(0, 40);
+      return null;
+    }
+  }
+
+  // Format an actor or instance-typed subject. Resolves UUIDs to instance
+  // labels via the live `instances` store; falls back to a short UUID.
+  // The literal "system" string is preserved (server-side actor for
+  // automated cascades & stale reclaims).
+  function formatInstanceRef(
+    id: string | null,
+    instMap: Map<string, Instance>,
+  ): string {
+    if (!id) return '—';
+    if (id === 'system') return 'system';
+    const inst = instMap.get(id);
+    if (inst?.label) return inst.label;
+    return shortId(id);
+  }
+
+  function formatTaskRef(id: string | null, tasks: Map<string, Task>): string {
+    if (!id) return '—';
+    const task = tasks.get(id);
+    if (task?.title) return truncate(task.title, 36);
+    return shortId(id);
+  }
+
+  // Subject formatting depends on what kind of entity the subject is for
+  // each event type. Falls back to the raw shortId for unknown types so
+  // we never silently swallow new event categories.
+  function formatSubject(
+    evt: Event,
+    instMap: Map<string, Instance>,
+    tasks: Map<string, Task>,
+  ): string {
+    if (!evt.subject) {
+      return evt.type === 'message.broadcast' ? 'broadcast' : '—';
+    }
+    if (evt.type.startsWith('instance.') || evt.type.startsWith('message.')) {
+      return formatInstanceRef(evt.subject, instMap);
+    }
+    if (evt.type.startsWith('task.')) {
+      return formatTaskRef(evt.subject, tasks);
+    }
+    if (evt.type.startsWith('context.')) {
+      return basename(evt.subject);
+    }
+    if (evt.type.startsWith('kv.')) {
+      return truncate(evt.subject, 36);
+    }
+    return shortId(evt.subject);
+  }
+
+  function subjectTitle(evt: Event): string {
+    if (!evt.subject) return '';
+    if (evt.type.startsWith('context.') || evt.type.startsWith('kv.')) {
+      return evt.subject;
+    }
+    return evt.subject;
+  }
+
+  // Per-event-type summary. Returns a compact human-readable description
+  // of the most useful payload field(s); falls back to '' rather than
+  // dumping raw JSON (the expanded view shows full payload).
+  function eventSummary(
+    evt: Event,
+    instMap: Map<string, Instance>,
+    tasks: Map<string, Task>,
+  ): string {
+    const p = parsePayload(evt.payload);
+
+    switch (evt.type) {
+      case 'message.sent': {
+        const len = typeof p?.length === 'number' ? p.length : null;
+        return len !== null ? `${len} chars` : '';
+      }
+      case 'message.broadcast': {
+        const r = typeof p?.recipients === 'number' ? p.recipients : null;
+        const len = typeof p?.length === 'number' ? p.length : null;
+        if (r === null) return '';
+        return len !== null
+          ? `→ ${r} recipient(s) · ${len} chars`
+          : `→ ${r} recipient(s)`;
+      }
+      case 'task.created': {
+        const title = typeof p?.title === 'string' ? p.title : '';
+        const status = typeof p?.status === 'string' ? p.status : '';
+        const t = typeof p?.task_type === 'string' ? `[${p.task_type}] ` : '';
+        const head = title ? truncate(title, 40) : '';
+        if (head && status) return `${t}${head} · ${status}`;
+        if (head) return `${t}${head}`;
+        if (status) return `${t}→ ${status}`;
+        return t.trim();
+      }
+      case 'task.claimed':
+        return 'claimed';
+      case 'task.updated': {
+        const status = typeof p?.status === 'string' ? p.status : '';
+        const prior = typeof p?.prior_status === 'string' ? p.prior_status : '';
+        if (prior && status) return `${prior} → ${status}`;
+        if (status) return `→ ${status}`;
+        return 'updated';
+      }
+      case 'task.approved': {
+        const status = typeof p?.status === 'string' ? p.status : '';
+        return status ? `approved → ${status}` : 'approved';
+      }
+      case 'task.cascade.unblocked': {
+        const status = typeof p?.status === 'string' ? p.status : '';
+        return status
+          ? `auto-unblocked → ${status}`
+          : 'auto-unblocked';
+      }
+      case 'task.cascade.cancelled': {
+        const reason = typeof p?.reason === 'string' ? p.reason : '';
+        const trigger =
+          typeof p?.trigger === 'string'
+            ? formatTaskRef(p.trigger, tasks)
+            : '';
+        if (reason && trigger) {
+          return `auto-cancelled · ${reason} (${trigger})`;
+        }
+        if (reason) return `auto-cancelled · ${reason}`;
+        return 'auto-cancelled';
+      }
+      case 'kv.set': {
+        const len = typeof p?.length === 'number' ? p.length : null;
+        return len !== null ? `set · ${len} bytes` : 'set';
+      }
+      case 'kv.deleted':
+        return 'deleted';
+      case 'kv.appended': {
+        const len = typeof p?.length === 'number' ? p.length : null;
+        return len !== null ? `appended · ${len} item(s)` : 'appended';
+      }
+      case 'context.annotated': {
+        const kind =
+          typeof p?.annotation_type === 'string' ? p.annotation_type : '';
+        return kind || 'annotated';
+      }
+      case 'context.lock_acquired':
+        return 'locked';
+      case 'context.lock_released': {
+        const n = typeof p?.released === 'number' ? p.released : null;
+        return n !== null && n !== 1 ? `released · ${n}` : 'released';
+      }
+      case 'instance.registered': {
+        const label = typeof p?.label === 'string' ? p.label : '';
+        const adopted = p?.adopted === true;
+        const pid = typeof p?.pid === 'number' ? `pid ${p.pid}` : '';
+        const head = adopted ? 'adopted' : 'registered';
+        const parts = [head, label, pid].filter(Boolean);
+        return parts.join(' · ');
+      }
+      case 'instance.deregistered': {
+        const label = typeof p?.label === 'string' ? p.label : '';
+        return label ? `deregistered · ${label}` : 'deregistered';
+      }
+      case 'instance.stale_reclaimed': {
+        const label = typeof p?.label === 'string' ? p.label : '';
+        return label ? `timed out · ${label}` : 'timed out';
+      }
+      default:
+        return '';
     }
   }
 
@@ -295,6 +534,48 @@
     } catch {
       return evt.payload;
     }
+  }
+
+  function isSystemRow(evt: Event): boolean {
+    return evt.actor === 'system' || evt.type.startsWith('task.cascade.');
+  }
+
+  // Liveness summary for the selected instance (single-node selection
+  // only). Combines heartbeat freshness and the row-level `status` so the
+  // user can tell at a glance whether quiet activity = "alive but idle"
+  // vs "agent has gone away".
+  type Liveness = {
+    label: string;
+    color: string;
+    heartbeatRel: string;
+    heartbeatAbs: string;
+  };
+
+  $: liveness = nodeData?.instance
+    ? deriveLiveness(nodeData.instance, nowMs)
+    : null;
+
+  function deriveLiveness(inst: Instance, now: number): Liveness {
+    const beatMs = timestampToMillis(inst.heartbeat) ?? 0;
+    const age = beatMs ? now - beatMs : Infinity;
+    let label: string;
+    let color: string;
+    if (age < STALE_AFTER_MS) {
+      label = 'alive';
+      color = 'var(--status-online, #a6e3a1)';
+    } else if (age < OFFLINE_AFTER_MS) {
+      label = 'stale';
+      color = 'var(--status-stale, #f9e2af)';
+    } else {
+      label = 'offline';
+      color = 'var(--status-offline, #f38ba8)';
+    }
+    return {
+      label,
+      color,
+      heartbeatRel: formatRelative(inst.heartbeat, now),
+      heartbeatAbs: formatTimestamp(inst.heartbeat),
+    };
   }
 
   // -------------------------------------------------------------------
@@ -678,10 +959,25 @@
         >
           <span class="kv-caret" class:open={!activityCollapsed}>▸</span>
           <span class="kv-title">
-            Activity ({visibleEvents.length}{selectedScope ? '' : ' · all scopes'})
+            Activity ({visibleEvents.length}{selectedActors.size > 0
+              ? ' · this selection'
+              : selectedScope
+              ? ''
+              : ' · all scopes'})
           </span>
         </button>
         {#if !activityCollapsed}
+          {#if liveness}
+            <div class="activity-liveness" title={`heartbeat: ${liveness.heartbeatAbs}`}>
+              <span class="liveness-dot" style:background={liveness.color}></span>
+              <span class="liveness-label" style:color={liveness.color}>
+                {liveness.label}
+              </span>
+              <span class="liveness-detail">
+                · last beat {liveness.heartbeatRel}
+              </span>
+            </div>
+          {/if}
           <div class="activity-chips">
             {#each ACTIVITY_CATEGORIES as cat (cat.id)}
               {@const on = activityFilter.has(cat.id)}
@@ -697,30 +993,64 @@
               </button>
             {/each}
           </div>
+          {#if bufferFull}
+            <div class="activity-meta">
+              Showing latest {EVENTS_BUFFER_CAP} events — older entries dropped.
+            </div>
+          {/if}
           {#if visibleEvents.length === 0}
-            <div class="activity-empty">No events match the current filter.</div>
+            <div class="activity-empty">
+              {#if scopeMatchedCount > 0}
+                <span>No events match the active category filters.</span>
+                <button
+                  type="button"
+                  class="activity-reset"
+                  on:click={resetActivityFilters}
+                >
+                  reset filters
+                </button>
+              {:else if selectedActors.size > 0}
+                <span>No events involve this selection yet.</span>
+              {:else if selectedScope}
+                <span>No events recorded in this scope yet.</span>
+              {:else}
+                <span>No events recorded yet.</span>
+              {/if}
+            </div>
           {:else}
             <div class="activity-list">
               {#each visibleEvents as evt (evt.id)}
                 {@const expanded = expandedEventIds.has(evt.id)}
-                <div class="activity-row" class:expanded>
+                {@const system = isSystemRow(evt)}
+                <div class="activity-row" class:expanded class:system>
                   <button
                     type="button"
                     class="activity-row-head"
                     on:click={() => toggleEventRow(evt)}
                   >
-                    <span class="activity-time">{formatTimestamp(evt.created_at)}</span>
+                    <span
+                      class="activity-time"
+                      title={formatTimestamp(evt.created_at)}
+                    >
+                      {formatRelative(evt.created_at, nowMs)}
+                    </span>
                     <span class="activity-type" style:color={eventColor(evt.type)}>
                       {evt.type}
                     </span>
-                    <span class="activity-actor mono" title={evt.actor ?? ''}>
-                      {shortId(evt.actor)}
+                    <span
+                      class="activity-actor"
+                      class:system-actor={evt.actor === 'system'}
+                      title={evt.actor ?? '(no actor)'}
+                    >
+                      {formatInstanceRef(evt.actor, $instances)}
                     </span>
                     <span class="activity-arrow">›</span>
-                    <span class="activity-subject mono" title={evt.subject ?? ''}>
-                      {shortId(evt.subject)}
+                    <span class="activity-subject" title={subjectTitle(evt)}>
+                      {formatSubject(evt, $instances, $taskStore)}
                     </span>
-                    <span class="activity-summary">{eventSummary(evt)}</span>
+                    <span class="activity-summary">
+                      {eventSummary(evt, $instances, $taskStore)}
+                    </span>
                   </button>
                   {#if expanded}
                     <pre class="activity-detail mono">{eventDetail(evt)}</pre>
@@ -1172,6 +1502,61 @@
     color: #6c7086;
     font-size: 11px;
     padding: 4px 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .activity-reset {
+    background: transparent;
+    border: 1px solid rgba(108, 112, 134, 0.4);
+    color: #a6adc8;
+    border-radius: 10px;
+    padding: 2px 8px;
+    font-size: 9.5px;
+    font-weight: 600;
+    text-transform: lowercase;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    transition: border-color 0.12s ease, color 0.12s ease;
+  }
+
+  .activity-reset:hover {
+    border-color: var(--terminal-fg, #c0caf5);
+    color: var(--terminal-fg, #c0caf5);
+  }
+
+  .activity-meta {
+    color: #6c7086;
+    font-size: 9.5px;
+    padding: 2px 0 4px 0;
+    font-style: italic;
+  }
+
+  .activity-liveness {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 0 8px 0;
+    font-size: 10.5px;
+  }
+
+  .liveness-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .liveness-label {
+    font-weight: 600;
+    text-transform: lowercase;
+    letter-spacing: 0.04em;
+  }
+
+  .liveness-detail {
+    color: #6c7086;
   }
 
   .activity-list {
@@ -1186,6 +1571,14 @@
 
   .activity-row.expanded {
     background: rgba(108, 112, 134, 0.06);
+  }
+
+  .activity-row.system .activity-row-head {
+    font-style: italic;
+  }
+
+  .activity-row.system .activity-type {
+    opacity: 0.85;
   }
 
   .activity-row-head {
@@ -1211,7 +1604,8 @@
     color: #6c7086;
     font-size: 9.5px;
     flex-shrink: 0;
-    width: 56px;
+    width: 52px;
+    text-align: right;
   }
 
   .activity-type {
@@ -1224,6 +1618,15 @@
     color: #a6adc8;
     font-size: 10px;
     flex-shrink: 0;
+    max-width: 110px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .activity-actor.system-actor {
+    color: #6c7086;
+    font-style: italic;
   }
 
   .activity-arrow {
@@ -1236,6 +1639,10 @@
     color: #a6adc8;
     font-size: 10px;
     flex-shrink: 0;
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .activity-summary {
