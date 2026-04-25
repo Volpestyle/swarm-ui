@@ -9,26 +9,11 @@
 
 use crate::{
     bind::Binder,
-    model::{AppError, InstanceStatus, SavedLayout},
+    model::{AppError, SavedLayout},
+    pty::PtyManager,
     writes,
 };
 use tauri::{AppHandle, Runtime, State};
-
-fn instance_status_from_heartbeat(heartbeat: i64) -> InstanceStatus {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
-        .unwrap_or_default();
-    InstanceStatus::from_heartbeat(now, heartbeat)
-}
-
-fn instance_status_label(status: InstanceStatus) -> &'static str {
-    match status {
-        InstanceStatus::Online => "online",
-        InstanceStatus::Stale => "stale",
-        InstanceStatus::Offline => "offline",
-    }
-}
 
 /// Clear all message history between two instances in either direction.
 /// Triggered by the Inspector's "Clear messages" button on a selected
@@ -91,9 +76,14 @@ pub fn ui_remove_dependency(
 
 /// Remove an instance row and everything keyed to it (locks, queued
 /// messages, task assignments released). Used when the user clicks the
-/// remove button on a disconnected node whose PTY is already gone — e.g.,
-/// an orphan row left over from a previous UI session, or a child process
-/// the user killed outside the UI.
+/// retire/remove button on a disconnected node whose PTY is already gone.
+///
+/// Guard rationale: we only block the call when we can prove the bound
+/// PTY's child process is still alive — `session_alive` checks the
+/// locally-tracked exit_code. Heartbeat age is intentionally not
+/// re-checked here: the frontend gates the retire action on `offline | stale`
+/// or on a locally observed PTY exit, which can happen before the heartbeat has
+/// had time to age out.
 ///
 /// No scope check: the UI can see any instance in the snapshot, so the
 /// user gets to decide what to clean up. The binder mapping is dropped
@@ -102,6 +92,7 @@ pub fn ui_remove_dependency(
 #[tauri::command]
 pub fn ui_deregister_instance(
     binder: State<'_, Binder>,
+    pty_manager: State<'_, PtyManager>,
     instance_id: String,
 ) -> Result<(), AppError> {
     let trimmed = instance_id.trim();
@@ -110,22 +101,20 @@ pub fn ui_deregister_instance(
     }
 
     let conn = writes::open_rw().map_err(AppError::Operation)?;
-    let instance = writes::load_instance_info(&conn, trimmed)
+    let _instance = writes::load_instance_info(&conn, trimmed)
         .map_err(AppError::Operation)?
         .ok_or_else(|| AppError::NotFound(format!("instance {trimmed} not found")))?;
 
-    if binder.resolved_pty_for(trimmed).is_some() {
-        return Err(AppError::Validation(format!(
-            "instance {trimmed} still has a live PTY in this session"
-        )));
-    }
-
-    let status = instance_status_from_heartbeat(instance.heartbeat);
-    if !matches!(status, InstanceStatus::Stale | InstanceStatus::Offline) {
-        return Err(AppError::Validation(format!(
-            "instance {trimmed} is {} and cannot be removed yet",
-            instance_status_label(status)
-        )));
+    if let Some(pty_id) = binder.resolved_pty_for(trimmed) {
+        if pty_manager.session_alive(&pty_id) {
+            return Err(AppError::Validation(format!(
+                "instance {trimmed} still has a live PTY in this session"
+            )));
+        }
+        // Stale binding: the PTY has exited but the snapshot tick hasn't
+        // yet propagated the unbind. Drop it eagerly so subsequent code
+        // paths don't trip over it.
+        binder.unbind(trimmed);
     }
 
     writes::deregister_instance(&conn, trimmed).map_err(AppError::Operation)?;
@@ -163,9 +152,13 @@ pub fn ui_deregister_offline_instances(
         .query_map([stale_cutoff], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
-        .map_err(|err| AppError::Operation(format!("failed to enumerate offline instances: {err}")))?
+        .map_err(|err| {
+            AppError::Operation(format!("failed to enumerate offline instances: {err}"))
+        })?
         .collect::<Result<_, _>>()
-        .map_err(|err| AppError::Operation(format!("failed to read offline instance row: {err}")))?;
+        .map_err(|err| {
+            AppError::Operation(format!("failed to read offline instance row: {err}"))
+        })?;
     drop(stmt);
 
     let mut removed = 0usize;

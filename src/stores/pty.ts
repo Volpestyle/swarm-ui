@@ -23,6 +23,7 @@ import type {
   RolePresetSummary,
 } from '../lib/types';
 import { resolveHarnessCommand } from './harnessAliases';
+import { removeInstanceLocal } from './swarm';
 
 const HARNESS_AUTOTYPE_MIN_DELAY_MS = 200;
 const PTY_READY_TIMEOUT_MS = 1500;
@@ -184,6 +185,35 @@ export const ptySessions = writable<Map<string, PtySession>>(new Map());
 /** Current binding state between PTYs and swarm instances */
 export const bindings = writable<BindingState>({ pending: [], resolved: [] });
 
+/** Instance rows whose local PTY exited before heartbeat status aged out. */
+export const retirableInstanceIds = writable<Set<string>>(new Set());
+
+function markRetirableInstance(instanceId: string | null | undefined): void {
+  if (!instanceId) return;
+  retirableInstanceIds.update((ids) => {
+    const next = new Set(ids);
+    next.add(instanceId);
+    return next;
+  });
+}
+
+function clearRetirableInstance(instanceId: string | null | undefined): void {
+  if (!instanceId) return;
+  retirableInstanceIds.update((ids) => {
+    if (!ids.has(instanceId)) return ids;
+    const next = new Set(ids);
+    next.delete(instanceId);
+    return next;
+  });
+}
+
+function markRetirableForPty(ptyId: string): void {
+  markRetirableInstance(get(ptySessions).get(ptyId)?.bound_instance_id);
+  for (const [instanceId, resolvedPtyId] of get(bindings).resolved) {
+    if (resolvedPtyId === ptyId) markRetirableInstance(instanceId);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Derived stores
 // ---------------------------------------------------------------------------
@@ -309,6 +339,7 @@ export async function initPtyStore(): Promise<void> {
   // Listen for PTY closure events
   ptyClosedUnlisten = await listen<string>('pty:closed', (event) => {
     clearPtyTerminalReady(event.payload);
+    markRetirableForPty(event.payload);
     removeBindingForPty(event.payload);
     ptySessions.update((map) => {
       const next = new Map(map);
@@ -327,6 +358,7 @@ export async function initPtyStore(): Promise<void> {
     (event) => {
       const { instance_id, pty_id } = event.payload;
 
+      clearRetirableInstance(instance_id);
       resolveBinding(instance_id, pty_id);
       patchSession(pty_id, { bound_instance_id: instance_id });
     },
@@ -365,17 +397,22 @@ export async function initPtyStore(): Promise<void> {
     },
   );
 
-  // A bound PTY's child exited. Drop the binding mapping and clear
-  // bound_instance_id on the session — the backend has already deleted any
-  // unadopted placeholder row from swarm.db. The session itself stays in
-  // the map until pty:closed so the exit overlay can render.
+  // A bound PTY's child exited. Drop the terminal side immediately so the
+  // graph replaces the bound card with the recoverable instance card instead
+  // of briefly rendering both an exited terminal and its metadata row.
   ptyBoundExitUnlisten = await listen<{
     pty_id: string;
     instance_id: string;
   }>('pty:bound_exit', (event) => {
-    const { pty_id } = event.payload;
+    const { pty_id, instance_id } = event.payload;
+    markRetirableInstance(instance_id);
+    clearPtyTerminalReady(pty_id);
     removeBindingForPty(pty_id);
-    patchSession(pty_id, { bound_instance_id: null });
+    ptySessions.update((map) => {
+      const next = new Map(map);
+      next.delete(pty_id);
+      return next;
+    });
   });
 }
 
@@ -442,14 +479,42 @@ export async function releasePtyLease(id: string): Promise<void> {
  */
 export async function closePty(id: string): Promise<void> {
   await invoke('pty_close', { id });
+  markRetirableForPty(id);
   clearPtyTerminalReady(id);
-  // Optimistic removal (backend will also emit pty:closed)
-  removeBindingForPty(id);
-  ptySessions.update((map) => {
-    const next = new Map(map);
-    next.delete(id);
-    return next;
+  // Keep the session visible until the daemon publishes the catalog remove.
+  // The server emits an exit-code upsert first, then retains the PTY briefly
+  // for replay/inspection, so local removal here would drift from MCP truth.
+}
+
+/**
+ * Close a PTY and wait for its exit event before resolving. Used by the
+ * "close + remove tile" flow so the subsequent `deregisterInstance` call
+ * doesn't race the backend's `session_alive` guard. Falls through after
+ * `timeoutMs` if the event never arrives — the caller can still try the
+ * deregister and will surface any backend rejection.
+ *
+ * Listener is attached BEFORE `pty_close` is invoked so the exit event
+ * cannot fire in the gap between issuing the kill and subscribing.
+ */
+export async function closePtyAwaitExit(id: string, timeoutMs = 5000): Promise<void> {
+  let resolveExit: (() => void) | null = null;
+  const exitPromise = new Promise<void>((resolve) => {
+    resolveExit = resolve;
   });
+  const unlisten = await subscribeToPtyExit(id, () => {
+    const fn = resolveExit;
+    resolveExit = null;
+    fn?.();
+  });
+  try {
+    await closePty(id);
+    await Promise.race([
+      exitPromise,
+      new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+    ]);
+  } finally {
+    unlisten();
+  }
 }
 
 /**
@@ -557,6 +622,7 @@ export async function getRolePresets(): Promise<RolePresetSummary[]> {
  */
 export async function respawnInstance(instanceId: string): Promise<RespawnResult> {
   const result = await invoke<RespawnResult>('respawn_instance', { instanceId });
+  clearRetirableInstance(instanceId);
 
   const session: PtySession = {
     id: result.pty_id,
@@ -594,12 +660,15 @@ export async function respawnInstance(instanceId: string): Promise<RespawnResult
  */
 export async function deregisterInstance(instanceId: string): Promise<void> {
   await invoke('ui_deregister_instance', { instanceId });
-  // Drop the binder mapping on our side immediately so the bound: node
-  // disappears from the graph without waiting for the swarm:update tick.
+  clearRetirableInstance(instanceId);
+  // Drop the binder mapping and the instance row on our side immediately
+  // so the node disappears from the graph without waiting for the next
+  // swarm:update tick.
   bindings.update((state) => ({
     pending: state.pending,
     resolved: state.resolved.filter(([id]) => id !== instanceId),
   }));
+  removeInstanceLocal(instanceId);
 }
 
 /**
@@ -645,6 +714,7 @@ export async function deregisterOfflineInstances(
     removed += await invoke<number>('ui_deregister_offline_instances', {
       scope: scope ?? null,
     });
+    for (const instanceId of targetIds) clearRetirableInstance(instanceId);
   } catch (err) {
     console.error('[pty] bulk deregister failed:', err);
     throw err;
