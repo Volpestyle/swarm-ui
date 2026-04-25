@@ -24,22 +24,6 @@ use crate::{
 
 const PLANNER_OWNER_KEY: &str = "owner/planner";
 const UI_LAYOUT_KEY: &str = "ui/layout";
-const SWARM_DB_BOOTSTRAP_SQL: &str = include_str!("../../../../sql/swarm_db_bootstrap.sql");
-const SWARM_DB_FINALIZE_SQL: &str = include_str!("../../../../sql/swarm_db_finalize.sql");
-const COLUMN_MIGRATIONS: &[(&str, &str)] = &[
-    ("instances", "scope TEXT NOT NULL DEFAULT ''"),
-    ("instances", "root TEXT NOT NULL DEFAULT ''"),
-    ("instances", "file_root TEXT NOT NULL DEFAULT ''"),
-    ("instances", "adopted INTEGER NOT NULL DEFAULT 1"),
-    ("messages", "scope TEXT NOT NULL DEFAULT ''"),
-    ("tasks", "scope TEXT NOT NULL DEFAULT ''"),
-    ("tasks", "changed_at INTEGER NOT NULL DEFAULT 0"),
-    ("tasks", "priority INTEGER NOT NULL DEFAULT 0"),
-    ("tasks", "depends_on TEXT"),
-    ("tasks", "idempotency_key TEXT"),
-    ("tasks", "parent_task_id TEXT"),
-    ("context", "scope TEXT NOT NULL DEFAULT ''"),
-];
 
 fn now_secs() -> i64 {
     let secs = std::time::SystemTime::now()
@@ -92,84 +76,6 @@ pub fn open_rw_at(path: &Path) -> Result<Connection, String> {
     ensure_schema(&conn)?;
 
     Ok(conn)
-}
-
-fn table_exists(conn: &Connection, table: &str) -> Result<bool, String> {
-    conn.query_row(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
-        [table],
-        |_| Ok(()),
-    )
-    .optional()
-    .map(|row| row.is_some())
-    .map_err(|err| format!("failed to inspect sqlite_master for {table}: {err}"))
-}
-
-fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
-    let mut stmt = conn
-        .prepare(&format!("PRAGMA table_info({table})"))
-        .map_err(|err| format!("failed to inspect schema for {table}: {err}"))?;
-    let mut rows = stmt
-        .query([])
-        .map_err(|err| format!("failed to query schema for {table}: {err}"))?;
-    while let Some(row) = rows
-        .next()
-        .map_err(|err| format!("failed to read schema row for {table}: {err}"))?
-    {
-        let name: String = row
-            .get(1)
-            .map_err(|err| format!("failed to read column name for {table}: {err}"))?;
-        if name == column {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn add_column_if_missing(conn: &Connection, table: &str, spec: &str) -> Result<(), String> {
-    let name = spec
-        .split_whitespace()
-        .next()
-        .ok_or_else(|| format!("invalid column spec: {spec}"))?;
-    if column_exists(conn, table, name)? {
-        return Ok(());
-    }
-
-    conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {spec}"), [])
-        .map_err(|err| format!("failed to add {table}.{name}: {err}"))?;
-    Ok(())
-}
-
-fn rebuild_kv_table(conn: &Connection) -> Result<(), String> {
-    if !table_exists(conn, "kv")? || column_exists(conn, "kv", "scope")? {
-        return Ok(());
-    }
-
-    conn.execute_batch(
-        r#"
-        CREATE TABLE kv_next (
-          scope TEXT NOT NULL,
-          key TEXT NOT NULL,
-          value TEXT NOT NULL,
-          updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
-          PRIMARY KEY (scope, key)
-        );
-        INSERT INTO kv_next (scope, key, value, updated_at)
-        SELECT '', key, value, updated_at
-        FROM kv;
-        DROP TABLE kv;
-        ALTER TABLE kv_next RENAME TO kv;
-        "#,
-    )
-    .map_err(|err| format!("failed to rebuild kv table: {err}"))?;
-    Ok(())
-}
-
-fn ensure_columns(conn: &Connection) -> Result<(), String> {
-    for (table, spec) in COLUMN_MIGRATIONS {
-        add_column_if_missing(conn, table, spec)?;
-    }
-    Ok(())
 }
 
 fn touch_kv_scope(conn: &Connection, scope: &str) -> Result<(), String> {
@@ -298,13 +204,20 @@ pub fn complete_ui_command(
     record: &UiCommandRecord,
     result: &Value,
 ) -> Result<(), String> {
-    conn.execute(
-        "UPDATE ui_commands
+    let updated = conn
+        .execute(
+            "UPDATE ui_commands
          SET status = 'done', result = ?, error = NULL, completed_at = unixepoch()
-         WHERE id = ?",
-        params![result.to_string(), record.id],
-    )
-    .map_err(|err| format!("failed to complete ui command {}: {err}", record.id))?;
+         WHERE id = ? AND status = 'running'",
+            params![result.to_string(), record.id],
+        )
+        .map_err(|err| format!("failed to complete ui command {}: {err}", record.id))?;
+    if updated != 1 {
+        return Err(format!(
+            "failed to complete ui command {}: command is no longer running",
+            record.id
+        ));
+    }
     emit_event(
         conn,
         &record.scope,
@@ -320,13 +233,20 @@ pub fn fail_ui_command(
     record: &UiCommandRecord,
     error: &str,
 ) -> Result<(), String> {
-    conn.execute(
-        "UPDATE ui_commands
+    let updated = conn
+        .execute(
+            "UPDATE ui_commands
          SET status = 'failed', error = ?, completed_at = unixepoch()
-         WHERE id = ?",
-        params![error, record.id],
-    )
-    .map_err(|err| format!("failed to fail ui command {}: {err}", record.id))?;
+         WHERE id = ? AND status = 'running'",
+            params![error, record.id],
+        )
+        .map_err(|err| format!("failed to fail ui command {}: {err}", record.id))?;
+    if updated != 1 {
+        return Err(format!(
+            "failed to fail ui command {}: command is no longer running",
+            record.id
+        ));
+    }
     emit_event(
         conn,
         &record.scope,
@@ -489,24 +409,15 @@ fn dependency_state(
 }
 
 fn ensure_schema(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch(SWARM_DB_BOOTSTRAP_SQL)
-    .map_err(|err| format!("failed to bootstrap schema: {err}"))?;
-
-    ensure_columns(conn)?;
-    rebuild_kv_table(conn)?;
-
-    conn.execute_batch(SWARM_DB_FINALIZE_SQL)
-        .map_err(|err| format!("failed to finalize schema: {err}"))?;
-
-    Ok(())
+    swarm_schema::ensure_schema(conn)
 }
 
-/// Ensure the `instances.adopted` column exists on the shared swarm.db.
+/// Ensure the shared swarm.db schema is present and compatible.
 ///
-/// The Bun-side `src/db.ts` adds this column at startup, but swarm-ui can
-/// launch before any MCP client has ever opened the DB. Running an
-/// idempotent ALTER here guarantees the column is present before any write
-/// that references it.
+/// The Bun-side `src/db.ts` also bootstraps this schema, but swarm-ui can
+/// launch before any MCP client has opened the DB. Running the shared,
+/// idempotent bootstrap here guarantees write paths see the same tables,
+/// columns, indexes, and schema version.
 pub fn ensure_adopted_column(conn: &Connection) -> Result<(), String> {
     ensure_schema(conn)
 }
@@ -1371,6 +1282,47 @@ mod tests {
         );
 
         assert_eq!(instance_adoption_state(&conn, "missing").unwrap(), None);
+    }
+
+    #[test]
+    fn ui_command_transitions_are_one_way() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO ui_commands (scope, created_by, kind, payload)
+             VALUES ('s', 'planner', 'organize_nodes', '{}')",
+            [],
+        )
+        .unwrap();
+
+        let record = claim_next_ui_command(&conn, "worker-1")
+            .unwrap()
+            .expect("pending command should be claimed");
+
+        let (status, claimed_by): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, claimed_by FROM ui_commands WHERE id = ?",
+                params![record.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "running");
+        assert_eq!(claimed_by.as_deref(), Some("worker-1"));
+
+        complete_ui_command(&conn, &record, &json!({ "ok": true })).unwrap();
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM ui_commands WHERE id = ?",
+                params![record.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "done");
+
+        let err = fail_ui_command(&conn, &record, "late failure").unwrap_err();
+        assert!(err.contains("no longer running"));
     }
 
     #[test]
