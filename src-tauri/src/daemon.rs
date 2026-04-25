@@ -91,10 +91,7 @@ impl ServerLaunchPlan {
             Self::Binary(path) => Command::new(path),
             Self::Cargo { manifest_path } => {
                 let mut command = Command::new(cargo_binary());
-                command
-                    .arg("run")
-                    .arg("--manifest-path")
-                    .arg(manifest_path);
+                command.arg("run").arg("--manifest-path").arg(manifest_path);
                 command
             }
         };
@@ -138,8 +135,7 @@ fn workspace_server_binary_candidates() -> Vec<PathBuf> {
 }
 
 fn workspace_manifest_path() -> Option<PathBuf> {
-    workspace_root()
-        .map(|root| root.join("apps").join("swarm-server").join("Cargo.toml"))
+    workspace_root().map(|root| root.join("apps").join("swarm-server").join("Cargo.toml"))
 }
 
 fn server_launch_plan_with(
@@ -212,10 +208,7 @@ mod tests {
     use super::*;
 
     fn temp_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "swarm-ui-daemon-{name}-{}",
-            uuid::Uuid::new_v4()
-        ))
+        std::env::temp_dir().join(format!("swarm-ui-daemon-{name}-{}", uuid::Uuid::new_v4()))
     }
 
     #[test]
@@ -259,10 +252,7 @@ mod tests {
             true,
         );
 
-        assert_eq!(
-            plan,
-            Some(ServerLaunchPlan::Binary(override_bin.clone()))
-        );
+        assert_eq!(plan, Some(ServerLaunchPlan::Binary(override_bin.clone())));
 
         let _ = std::fs::remove_file(override_bin);
         let _ = std::fs::remove_file(manifest_path);
@@ -427,7 +417,7 @@ pub async fn close_pty(pty_id: &str) -> Result<(), String> {
     let request = ClosePtyRequest {
         v: PROTOCOL_VERSION,
         pty_id: pty_id.to_owned(),
-        force: false,
+        force: true,
     };
     let _: Ack = json_request(Method::DELETE, &format!("/pty/{pty_id}"), &request).await?;
     Ok(())

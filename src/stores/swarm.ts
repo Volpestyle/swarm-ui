@@ -605,6 +605,20 @@ export function getInstance(instanceId: string): Instance | undefined {
 }
 
 /**
+ * Optimistically drop an instance from the local snapshot. Used after
+ * `ui_deregister_instance` succeeds so the tile disappears immediately
+ * without waiting for the next swarm-server snapshot tick.
+ */
+export function removeInstanceLocal(instanceId: string): void {
+  rawInstances.update((map) => {
+    if (!map.has(instanceId)) return map;
+    const next = new Map(map);
+    next.delete(instanceId);
+    return next;
+  });
+}
+
+/**
  * Get a task by ID from the current snapshot.
  */
 export function getTask(taskId: string): Task | undefined {

@@ -183,6 +183,53 @@
   border-bottom-color: color-mix(in srgb, var(--node-border-selected) 35%, var(--node-header-border));
 }
 
+.node-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 8px 10px 8px 16px;
+  border-bottom: 1px solid var(--node-header-border);
+  background: var(--node-bg);
+  font-size: 11px;
+  line-height: 1.4;
+  user-select: text;
+}
+
+.node-alert.error {
+  color: var(--edge-task-failed);
+  background: color-mix(in srgb, var(--edge-task-failed) 9%, var(--node-bg));
+  border-bottom-color: color-mix(in srgb, var(--edge-task-failed) 28%, var(--node-header-border));
+}
+
+.node-alert-message {
+  min-width: 0;
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.node-alert-dismiss {
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 4px;
+  padding: 0;
+  background: transparent;
+  color: currentColor;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0.72;
+  flex: 0 0 auto;
+  transition: background 0.12s ease, opacity 0.12s ease;
+}
+
+.node-alert-dismiss:hover {
+  background: color-mix(in srgb, var(--edge-task-failed) 12%, transparent);
+  opacity: 1;
+}
+
 /* macOS-style traffic lights — interactive node controls that mirror the
    native chrome affordance while still reading as part of the card header. */
 .traffic-lights {

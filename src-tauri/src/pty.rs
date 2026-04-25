@@ -417,6 +417,24 @@ impl PtyManager {
         Ok(snapshot)
     }
 
+    /// Returns true iff the given PTY is tracked locally and its child
+    /// process has not yet exited. Used by `ui_deregister_instance` to
+    /// distinguish a genuinely live PTY from a stale binder entry that
+    /// hasn't been unbound yet.
+    #[must_use]
+    pub fn session_alive(&self, pty_id: &str) -> bool {
+        let Ok(sessions) = self.sessions.read() else {
+            return false;
+        };
+        let Some(handle) = sessions.get(pty_id) else {
+            return false;
+        };
+        handle
+            .session_snapshot()
+            .map(|session| session.exit_code.is_none())
+            .unwrap_or(false)
+    }
+
     pub fn write_input(&self, id: &str, data: &[u8]) -> Result<(), AppError> {
         self.session(id)?;
         tauri::async_runtime::block_on(daemon::write_pty(id, data.to_vec()))
@@ -432,8 +450,7 @@ impl PtyManager {
 
     pub fn release_lease(&self, id: &str) -> Result<(), AppError> {
         self.session(id)?;
-        tauri::async_runtime::block_on(daemon::release_pty_lease(id))
-            .map_err(AppError::Operation)
+        tauri::async_runtime::block_on(daemon::release_pty_lease(id)).map_err(AppError::Operation)
     }
 
     fn session(&self, id: &str) -> Result<Arc<PtyHandle>, AppError> {
