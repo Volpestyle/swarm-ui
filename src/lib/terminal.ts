@@ -133,6 +133,33 @@ export async function createTerminal(
   term.open(container);
   fitToContainer();
 
+  // Plain PageUp/PageDown scroll the scrollback instead of being forwarded to
+  // the PTY. Shift adds line-granularity; Ctrl+Home/End jump to the ends.
+  // Returning true tells ghostty-web we handled the event (calls preventDefault
+  // and skips PTY forwarding).
+  term.attachCustomKeyEventHandler((event) => {
+    if (event.type !== 'keydown' || event.altKey || event.metaKey) return false;
+    if (event.key === 'PageUp') {
+      if (event.shiftKey) term.scrollLines(-1);
+      else term.scrollPages(-1);
+      return true;
+    }
+    if (event.key === 'PageDown') {
+      if (event.shiftKey) term.scrollLines(1);
+      else term.scrollPages(1);
+      return true;
+    }
+    if (event.ctrlKey && !event.shiftKey && event.key === 'Home') {
+      term.scrollToTop();
+      return true;
+    }
+    if (event.ctrlKey && !event.shiftKey && event.key === 'End') {
+      term.scrollToBottom();
+      return true;
+    }
+    return false;
+  });
+
   resizeObserver = new ResizeObserver(() => {
     scheduleFit();
   });
