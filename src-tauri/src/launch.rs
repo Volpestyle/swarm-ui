@@ -303,6 +303,9 @@ pub(crate) fn spawn_shell_impl<R: Runtime>(
         instance_id: None,
         cols: None,
         rows: None,
+        args: Vec::new(),
+        env: Default::default(),
+        initial_input: None,
     };
 
     let response =
@@ -421,6 +424,9 @@ pub async fn respawn_instance(
         instance_id: Some(existing.id.clone()),
         cols: None,
         rows: None,
+        args: Vec::new(),
+        env: Default::default(),
+        initial_input: None,
     };
     let response = daemon::spawn_pty(&request)
         .await

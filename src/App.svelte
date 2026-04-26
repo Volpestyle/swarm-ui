@@ -52,6 +52,7 @@
 
   // Custom node types (Agent 4)
   import TerminalNode from './nodes/TerminalNode.svelte';
+  import AlignmentGuideLayer from './nodes/AlignmentGuide.svelte';
   import ViewportFocus from './nodes/ViewportFocus.svelte';
 
   // Custom edge types (Agent 4)
@@ -71,6 +72,7 @@
     applyEdgeSelection,
     applyNodeSelection,
     findNodeById,
+    orderedFocusableNodeIds,
     orderedSelectableNodeIds,
     resolveNodeTargetId,
     resolveClosableNodeId,
@@ -82,8 +84,24 @@
     persistSidebarWidth,
     resolveSidebarWidth,
   } from './lib/app/sidebar';
+  import {
+    ALIGNMENT_GAP_STEP,
+    adjustNodeGapFromTarget,
+    alignNodeCenterToTarget,
+    alignNodeSideToTarget,
+    nextAlignmentLine,
+    nextAlignmentSide,
+    snapDraggedNodesToAlignment,
+    type AlignmentGuide,
+    type AlignmentLine,
+    type AlignmentSide,
+  } from './lib/app/alignment';
   import { workspaceOverlayActive } from './lib/workspaceOverlay';
-  import { requestNodeCanvasFillToggle } from './lib/app/focus';
+  import {
+    requestCanvasFitAll,
+    requestNodeCanvasFillToggle,
+    requestNodeFocus,
+  } from './lib/app/focus';
   import { agentWindowSettings } from './stores/agentWindowSettings';
   import {
     disposeAllTerminalSurfaces,
@@ -142,8 +160,14 @@
   const layoutPersistence = createLayoutPersistence();
   const COMPACT_NODE_WIDTH = 360;
   const COMPACT_NODE_HEIGHT = 148;
+  const ALIGNMENT_GUIDE_CLEAR_MS = 900;
   const compactRestoreSizes = new Map<string, { width?: number; height?: number }>();
   let compactNodeIdSet = new Set<string>();
+  let alignmentGuide: AlignmentGuide | null = null;
+  let alignmentLine: AlignmentLine = 'vertical';
+  let alignmentSide: AlignmentSide = 'left';
+  let alignmentTargetNodeId: string | null = null;
+  let alignmentGuideClearHandle: ReturnType<typeof setTimeout> | null = null;
 
   // -------------------------------------------------------------------
   // Fullscreen workspace state
@@ -157,6 +181,10 @@
   type WorkspaceStage = 'closed' | 'opening' | 'open' | 'closing';
   type LauncherHandle = {
     launch: () => Promise<boolean>;
+  };
+  type NodeDragPayload = {
+    targetNode: XYFlowNode | null;
+    nodes: XYFlowNode[];
   };
 
   let workspaceStage: WorkspaceStage = 'closed';
@@ -201,13 +229,28 @@
     selectedEdgeId = null;
     syncNodeSelection(null);
     syncEdgeSelection(null);
+    clearAlignmentGuide();
   }
 
-  function cycleSelectedNode(delta: number): void {
-    const ids = orderedSelectableNodeIds(nodes);
+  function centerNodeInCanvas(nodeId: string): void {
+    setSelectedNode(nodeId);
+    requestNodeFocus(nodeId);
+  }
+
+  function orderedAgentWindowNodeIds(): string[] {
+    const focusableIds = orderedFocusableNodeIds(nodes);
+    return focusableIds.length > 0 ? focusableIds : orderedSelectableNodeIds(nodes);
+  }
+
+  function cycleSelectedNode(
+    delta: number,
+    centerCanvas = false,
+    anchorNodeId: string | null = selectedNodeId,
+  ): void {
+    const ids = orderedAgentWindowNodeIds();
     if (ids.length === 0) return;
 
-    const currentIndex = selectedNodeId ? ids.indexOf(selectedNodeId) : -1;
+    const currentIndex = anchorNodeId ? ids.indexOf(anchorNodeId) : -1;
     const baseIndex = currentIndex >= 0
       ? currentIndex
       : delta > 0
@@ -218,6 +261,9 @@
     if (!nextId) return;
 
     setSelectedNode(nextId);
+    if (centerCanvas) {
+      requestNodeFocus(nextId);
+    }
     void focusNodeTerminal(nextId);
   }
 
@@ -227,6 +273,165 @@
 
     await tick();
     getTerminalSurface(ptyId).focus();
+  }
+
+  function clearAlignmentGuide(): void {
+    if (alignmentGuideClearHandle !== null) {
+      clearTimeout(alignmentGuideClearHandle);
+      alignmentGuideClearHandle = null;
+    }
+    alignmentGuide = null;
+  }
+
+  function showAlignmentGuide(guide: AlignmentGuide, autoClear = false): void {
+    if (alignmentGuideClearHandle !== null) {
+      clearTimeout(alignmentGuideClearHandle);
+      alignmentGuideClearHandle = null;
+    }
+
+    alignmentGuide = guide;
+
+    if (autoClear) {
+      alignmentGuideClearHandle = setTimeout(() => {
+        alignmentGuide = null;
+        alignmentGuideClearHandle = null;
+      }, ALIGNMENT_GUIDE_CLEAR_MS);
+    }
+  }
+
+  function alignmentTargetCandidates(sourceNodeId: string): string[] {
+    return orderedSelectableNodeIds(nodes).filter(
+      (nodeId) => nodeId !== sourceNodeId && findNodeById(nodes, nodeId) !== null,
+    );
+  }
+
+  function cycleAlignmentTarget(sourceNodeId: string, delta: number): string | null {
+    const candidates = alignmentTargetCandidates(sourceNodeId);
+    if (candidates.length === 0) return null;
+
+    const currentIndex = alignmentTargetNodeId
+      ? candidates.indexOf(alignmentTargetNodeId)
+      : -1;
+    if (currentIndex >= 0) {
+      return candidates[(currentIndex + delta + candidates.length) % candidates.length];
+    }
+
+    const orderedIds = orderedSelectableNodeIds(nodes);
+    const sourceIndex = orderedIds.indexOf(sourceNodeId);
+    if (sourceIndex >= 0) {
+      for (let step = 1; step < orderedIds.length; step += 1) {
+        const candidate = orderedIds[
+          (sourceIndex + delta * step + orderedIds.length) % orderedIds.length
+        ];
+        if (candidate && candidates.includes(candidate)) return candidate;
+      }
+    }
+
+    return delta > 0 ? candidates[0] : candidates[candidates.length - 1];
+  }
+
+  function currentAlignmentTarget(sourceNodeId: string): string | null {
+    if (
+      alignmentTargetNodeId &&
+      alignmentTargetNodeId !== sourceNodeId &&
+      findNodeById(nodes, alignmentTargetNodeId)
+    ) {
+      return alignmentTargetNodeId;
+    }
+
+    return cycleAlignmentTarget(sourceNodeId, +1);
+  }
+
+  function applyKeyboardAlignment(
+    sourceNodeId: string,
+    targetNodeId: string,
+    line: AlignmentLine,
+  ): boolean {
+    const result = alignNodeCenterToTarget(nodes, sourceNodeId, targetNodeId, line);
+    if (!result) return false;
+
+    nodes = result.nodes;
+    setSelectedNode(sourceNodeId);
+    alignmentTargetNodeId = targetNodeId;
+    alignmentLine = line;
+    showAlignmentGuide(result.guide, true);
+    return true;
+  }
+
+  function applyKeyboardSideAlignment(
+    sourceNodeId: string,
+    targetNodeId: string,
+    side: AlignmentSide,
+  ): boolean {
+    const result = alignNodeSideToTarget(nodes, sourceNodeId, targetNodeId, side);
+    if (!result) return false;
+
+    nodes = result.nodes;
+    setSelectedNode(sourceNodeId);
+    alignmentTargetNodeId = targetNodeId;
+    alignmentSide = side;
+    showAlignmentGuide(result.guide, true);
+    return true;
+  }
+
+  function applyKeyboardGapAdjustment(
+    sourceNodeId: string,
+    targetNodeId: string,
+    delta: number,
+  ): boolean {
+    const result = adjustNodeGapFromTarget(
+      nodes,
+      sourceNodeId,
+      targetNodeId,
+      delta,
+      alignmentSide,
+    );
+    if (!result) return false;
+
+    nodes = result.nodes;
+    setSelectedNode(sourceNodeId);
+    alignmentTargetNodeId = targetNodeId;
+    if (result.guide.side) {
+      alignmentSide = result.guide.side;
+    }
+    showAlignmentGuide(result.guide, true);
+    return true;
+  }
+
+  function applyDragAlignment(
+    sourceNodeId: string | null | undefined,
+    draggedNodes: XYFlowNode[],
+    autoClearGuide: boolean,
+  ): void {
+    if (!sourceNodeId) {
+      clearAlignmentGuide();
+      return;
+    }
+
+    const draggedNodeIds = new Set(draggedNodes.map((node) => node.id));
+    if (draggedNodeIds.size === 0) draggedNodeIds.add(sourceNodeId);
+
+    const draggedPositions = new Map(
+      draggedNodes.map((node) => [node.id, node.position]),
+    );
+    const workingNodes = nodes.map((node) => {
+      const draggedPosition = draggedPositions.get(node.id);
+      return draggedPosition
+        ? { ...node, position: draggedPosition }
+        : node;
+    });
+    const result = snapDraggedNodesToAlignment(workingNodes, sourceNodeId, draggedNodeIds);
+    if (!result) {
+      clearAlignmentGuide();
+      return;
+    }
+
+    nodes = result.nodes;
+    if (result.guide.line) {
+      alignmentLine = result.guide.line;
+    }
+    alignmentTargetNodeId = result.guide.targetNodeId;
+    showAlignmentGuide(result.guide, autoClearGuide);
   }
 
   async function closeNodeById(nodeId: string): Promise<boolean> {
@@ -466,6 +671,7 @@
     compactNodeIdsUnsubscribe = null;
     unregisterNodeWindowActions?.();
     unregisterNodeWindowActions = null;
+    clearAlignmentGuide();
     layoutPersistence.clear();
     disposeAllTerminalSurfaces();
     destroySwarmStore();
@@ -478,6 +684,22 @@
 
   function handleNodeClick({ node }: { node: { id: string } }) {
     setSelectedNode(node.id);
+  }
+
+  function handleNodeDragStart({ targetNode, nodes: draggedNodes }: NodeDragPayload) {
+    const sourceNodeId = targetNode?.id ?? draggedNodes[0]?.id ?? null;
+    if (sourceNodeId) {
+      setSelectedNode(sourceNodeId);
+    }
+    clearAlignmentGuide();
+  }
+
+  function handleNodeDrag({ targetNode, nodes: draggedNodes }: NodeDragPayload) {
+    applyDragAlignment(targetNode?.id ?? draggedNodes[0]?.id, draggedNodes, false);
+  }
+
+  function handleNodeDragStop({ targetNode, nodes: draggedNodes }: NodeDragPayload) {
+    applyDragAlignment(targetNode?.id ?? draggedNodes[0]?.id, draggedNodes, true);
   }
 
   function handleEdgeClick({ edge }: { edge: { id: string } }) {
@@ -601,7 +823,7 @@
         if (wantsCycleNext && !overlayOpen) {
           event.preventDefault();
           event.stopPropagation();
-          cycleSelectedNode(+1);
+          cycleSelectedNode(+1, true, resolveNodeTargetId(event, selectedNodeId));
           return;
         }
 
@@ -614,8 +836,105 @@
         if (wantsCyclePrevious && !overlayOpen) {
           event.preventDefault();
           event.stopPropagation();
-          cycleSelectedNode(-1);
+          cycleSelectedNode(-1, true, resolveNodeTargetId(event, selectedNodeId));
           return;
+        }
+
+        const wantsAlignmentTargetNext =
+          meta &&
+          event.altKey &&
+          (event.key === ']' || event.key === '}' || event.code === 'BracketRight');
+        const wantsAlignmentTargetPrevious =
+          meta &&
+          event.altKey &&
+          (event.key === '[' || event.key === '{' || event.code === 'BracketLeft');
+        const wantsAlignmentLineToggle =
+          meta &&
+          event.altKey &&
+          (event.key === '\\' || event.code === 'Backslash');
+        const wantsAlignmentSideCycle =
+          meta &&
+          event.altKey &&
+          (event.key === ';' || event.key === ':' || event.code === 'Semicolon');
+        const wantsAlignmentGapIncrease =
+          meta &&
+          event.altKey &&
+          (event.key === '=' || event.key === '+' || event.code === 'Equal');
+        const wantsAlignmentGapDecrease =
+          meta &&
+          event.altKey &&
+          (event.key === '-' || event.key === '_' || event.code === 'Minus');
+
+        if (
+          !overlayOpen &&
+          (
+            wantsAlignmentTargetNext ||
+            wantsAlignmentTargetPrevious ||
+            wantsAlignmentLineToggle ||
+            wantsAlignmentSideCycle ||
+            wantsAlignmentGapIncrease ||
+            wantsAlignmentGapDecrease
+          )
+        ) {
+          const sourceNodeId = resolveNodeTargetId(event, selectedNodeId);
+          if (sourceNodeId && findNodeById(nodes, sourceNodeId)) {
+            const nextLine = wantsAlignmentLineToggle
+              ? nextAlignmentLine(alignmentLine, +1)
+              : alignmentLine;
+            const nextSide = wantsAlignmentSideCycle
+              ? nextAlignmentSide(alignmentSide, event.shiftKey ? -1 : +1)
+              : alignmentSide;
+            const targetNodeId = wantsAlignmentTargetNext
+              ? cycleAlignmentTarget(sourceNodeId, +1)
+              : wantsAlignmentTargetPrevious
+                ? cycleAlignmentTarget(sourceNodeId, -1)
+                : currentAlignmentTarget(sourceNodeId);
+
+            const aligned = targetNodeId && (
+              wantsAlignmentGapIncrease
+                ? applyKeyboardGapAdjustment(sourceNodeId, targetNodeId, ALIGNMENT_GAP_STEP)
+                : wantsAlignmentGapDecrease
+                  ? applyKeyboardGapAdjustment(sourceNodeId, targetNodeId, -ALIGNMENT_GAP_STEP)
+                  : wantsAlignmentSideCycle
+                    ? applyKeyboardSideAlignment(sourceNodeId, targetNodeId, nextSide)
+                    : applyKeyboardAlignment(sourceNodeId, targetNodeId, nextLine)
+            );
+
+            if (aligned) {
+              event.preventDefault();
+              event.stopPropagation();
+              return;
+            }
+          }
+        }
+
+        const wantsFitAll =
+          meta &&
+          !event.shiftKey &&
+          event.altKey &&
+          (event.key === '0' || event.code === 'Digit0' || event.code === 'Numpad0');
+
+        if (wantsFitAll && !overlayOpen) {
+          event.preventDefault();
+          event.stopPropagation();
+          requestCanvasFitAll();
+          return;
+        }
+
+        const wantsCenter =
+          meta &&
+          !event.shiftKey &&
+          event.altKey &&
+          (event.key.toLowerCase() === 'c' || event.code === 'KeyC');
+
+        if (wantsCenter && !overlayOpen) {
+          const nodeId = resolveNodeTargetId(event, selectedNodeId);
+          if (nodeId && findNodeById(nodes, nodeId)) {
+            event.preventDefault();
+            event.stopPropagation();
+            centerNodeInCanvas(nodeId);
+            return;
+          }
         }
 
         const wantsCompact =
@@ -738,6 +1057,9 @@
       {edgeTypes}
       fitView
       onnodeclick={handleNodeClick}
+      onnodedragstart={handleNodeDragStart}
+      onnodedrag={handleNodeDrag}
+      onnodedragstop={handleNodeDragStop}
       onedgeclick={handleEdgeClick}
       onpaneclick={handlePaneClick}
       minZoom={0.2}
@@ -758,6 +1080,10 @@
         style="background: var(--node-header-bg); border: 1px solid var(--node-border); border-radius: 6px;"
       />
       <ViewportFocus rightInset={effectiveSidebarWidth} />
+      <AlignmentGuideLayer
+        guide={alignmentGuide}
+        rightInset={effectiveSidebarWidth}
+      />
     </SvelteFlow>
 
     <!-- Status bar overlays the canvas bottom-center -->

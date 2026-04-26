@@ -9,10 +9,10 @@
 
 import { writable } from 'svelte/store';
 
-export type FocusRequestMode = 'center' | 'fill-toggle';
+export type FocusRequestMode = 'center' | 'fill-toggle' | 'fit-all';
 
 export interface FocusRequest {
-  nodeId: string;
+  nodeId?: string;
   mode: FocusRequestMode;
   /** Monotonically incrementing token so duplicate requests for the same node still re-fire. */
   token: number;
@@ -28,4 +28,8 @@ export function requestNodeFocus(nodeId: string): void {
 
 export function requestNodeCanvasFillToggle(nodeId: string): void {
   focusRequest.set({ nodeId, mode: 'fill-toggle', token: nextToken++ });
+}
+
+export function requestCanvasFitAll(): void {
+  focusRequest.set({ mode: 'fit-all', token: nextToken++ });
 }

@@ -131,7 +131,7 @@ export function buildGraph(
     }
   }
 
-  edges.push(...buildConnectionEdges(messages, tasks, instanceToNodeId));
+  edges.push(...buildConnectionEdges(instances, messages, tasks, instanceToNodeId));
 
   return { nodes, edges };
 }
@@ -315,6 +315,7 @@ function resolvePosition(
  * the same curve.
  */
 function buildConnectionEdges(
+  instances: Map<string, Instance>,
   messages: Message[],
   tasks: Map<string, Task>,
   instanceToNodeId: Map<string, string>,
@@ -347,6 +348,18 @@ function buildConnectionEdges(
     }
     return bucket;
   };
+
+  // Ambient same-swarm connections. The store may pass a single active scope
+  // or every scope, so group by instance.scope to avoid linking separate swarms
+  // together when the UI is showing "all".
+  const instanceIdsByScope = groupBy([...instances.values()], (inst) => inst.scope);
+  for (const sameScopeInstances of instanceIdsByScope.values()) {
+    for (let i = 0; i < sameScopeInstances.length; i += 1) {
+      for (let j = i + 1; j < sameScopeInstances.length; j += 1) {
+        bucketFor(sameScopeInstances[i].id, sameScopeInstances[j].id);
+      }
+    }
+  }
 
   // Messages between two instances (skip broadcasts)
   for (const msg of messages) {
@@ -392,6 +405,10 @@ function buildConnectionEdges(
       edgeType: 'connection',
       sourceInstanceId: bucket.sourceInstanceId,
       targetInstanceId: bucket.targetInstanceId,
+      ambient:
+        bucket.messages.length === 0 &&
+        bucket.tasks.length === 0 &&
+        bucket.deps.length === 0,
       messages: bucket.messages,
       tasks: bucket.tasks,
       deps: bucket.deps,

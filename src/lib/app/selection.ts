@@ -69,6 +69,12 @@ export function orderedSelectableNodeIds(nodes: XYFlowNode[]): string[] {
     .map((node) => node.id);
 }
 
+export function orderedFocusableNodeIds(nodes: XYFlowNode[]): string[] {
+  return orderedSelectableNodeIds(
+    nodes.filter((node) => node.data?.ptySession != null),
+  );
+}
+
 export function nodeCanBeClosed(node: XYFlowNode | null): boolean {
   if (!node) return false;
   const data = node.data;

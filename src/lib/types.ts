@@ -211,6 +211,7 @@ export type ConnectionEdgeData = Record<string, unknown> & {
   edgeType: 'connection';
   sourceInstanceId: string;
   targetInstanceId: string;
+  ambient: boolean;
   messages: Message[];
   tasks: Task[];
   deps: ConnectionDep[];

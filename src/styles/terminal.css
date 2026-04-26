@@ -731,6 +731,20 @@
   animation: dash-flow 1s linear infinite;
 }
 
+.message-edge-path.ambient {
+  stroke: var(--terminal-fg);
+  stroke-width: 1.25;
+  stroke-linecap: round;
+  stroke-dasharray: 1 7;
+  animation: none;
+  opacity: 0.2;
+}
+
+.message-edge-path.ambient.selected {
+  opacity: 0.45;
+  stroke-width: 1.75;
+}
+
 /* Most recent traffic (< 10s) — thicker line */
 .message-edge-path.active {
   stroke-width: 2.5;

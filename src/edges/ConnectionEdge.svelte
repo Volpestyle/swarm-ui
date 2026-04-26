@@ -83,6 +83,8 @@
   $: messageCount = messages.length;
   $: taskCount = tasks.length;
   $: depCount = deps.length;
+  $: hasRelationship = messageCount > 0 || taskCount > 0 || depCount > 0;
+  $: ambient = data?.ambient ?? !hasRelationship;
 
   $: taskSeverity = worstTaskStatus(tasks);
   $: depSeverity = deps.some((d) => !d.satisfied) ? 'blocked' : 'satisfied';
@@ -283,6 +285,8 @@
     class="message-edge-path"
     class:active={isActive}
     class:stale
+    class:ambient
+    class:selected
     class:pulsing
     style="animation-duration: {animationSeconds}s"
     d={edgePath}
@@ -302,35 +306,39 @@
   {/each}
 </g>
 
-<EdgeLabel x={labelX} y={labelY}>
-  <div class="connection-key" class:selected>
-    {#if messageCount > 0}
-      <span class="chip msg" title="{messageCount} message{messageCount === 1 ? '' : 's'}">
-        <span class="chip-letter">M</span>
-        <span class="chip-count">{messageCount}</span>
-      </span>
+{#if hasRelationship || (hovering && messagePreview)}
+  <EdgeLabel x={labelX} y={labelY}>
+    {#if hasRelationship}
+      <div class="connection-key" class:selected>
+        {#if messageCount > 0}
+          <span class="chip msg" title="{messageCount} message{messageCount === 1 ? '' : 's'}">
+            <span class="chip-letter">M</span>
+            <span class="chip-count">{messageCount}</span>
+          </span>
+        {/if}
+        {#if taskCount > 0}
+          <span class="chip task {taskSeverity}" title="{taskCount} task{taskCount === 1 ? '' : 's'}">
+            <span class="chip-letter">T</span>
+            <span class="chip-count">{taskCount}</span>
+          </span>
+        {/if}
+        {#if depCount > 0}
+          <span class="chip dep {depSeverity}" title="{depCount} dependenc{depCount === 1 ? 'y' : 'ies'}">
+            <span class="chip-letter">D</span>
+            <span class="chip-count">{depCount}</span>
+          </span>
+        {/if}
+      </div>
     {/if}
-    {#if taskCount > 0}
-      <span class="chip task {taskSeverity}" title="{taskCount} task{taskCount === 1 ? '' : 's'}">
-        <span class="chip-letter">T</span>
-        <span class="chip-count">{taskCount}</span>
-      </span>
-    {/if}
-    {#if depCount > 0}
-      <span class="chip dep {depSeverity}" title="{depCount} dependenc{depCount === 1 ? 'y' : 'ies'}">
-        <span class="chip-letter">D</span>
-        <span class="chip-count">{depCount}</span>
-      </span>
-    {/if}
-  </div>
 
-  {#if hovering && messagePreview}
-    <div class="edge-tooltip">
-      <span style="opacity: 0.6; margin-right: 4px;">{messageCount}x</span>
-      {messagePreview}
-    </div>
-  {/if}
-</EdgeLabel>
+    {#if hovering && messagePreview}
+      <div class="edge-tooltip">
+        <span style="opacity: 0.6; margin-right: 4px;">{messageCount}x</span>
+        {messagePreview}
+      </div>
+    {/if}
+  </EdgeLabel>
+{/if}
 
 <style>
   /* XYFlow's EdgeLabel wrapper paints a default white pill background and

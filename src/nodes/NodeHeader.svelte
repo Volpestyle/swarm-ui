@@ -304,7 +304,7 @@
 
   <div class="node-controls">
     <button
-      title="Fullscreen in canvas (Cmd/Ctrl+Alt+F)"
+      title="Fullscreen in canvas (Cmd/Ctrl+Alt/Opt+F)"
       aria-label="Fullscreen in canvas"
       on:click|stopPropagation={() => dispatch('fillCanvas')}
     >

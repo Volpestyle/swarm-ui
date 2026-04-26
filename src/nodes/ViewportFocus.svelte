@@ -18,6 +18,8 @@
 
   const CENTER_CONTAIN_PADDING_PX = 72;
   const CENTER_DURATION_MS = 180;
+  const FIT_ALL_PADDING_PX = 96;
+  const FIT_ALL_DURATION_MS = 180;
   const FILL_PADDING_PX = 28;
   const FILL_DURATION_MS = 160;
   const RESTORE_DURATION_MS = 160;
@@ -25,7 +27,7 @@
   const POLL_TIMEOUT_MS = 2500;
 
   const store = useStore();
-  const { getNode, getNodesBounds, getViewport, setViewport } = useSvelteFlow();
+  const { getNode, getNodes, getNodesBounds, getViewport, setViewport } = useSvelteFlow();
 
   /** Pixels covered by the right sidebar. The canvas renders behind it. */
   export let rightInset = 0;
@@ -96,6 +98,36 @@
     return true;
   }
 
+  async function tryFitAll(): Promise<boolean> {
+    const nodeIds = getNodes()
+      .filter((node) => !node.hidden)
+      .map((node) => node.id);
+
+    if (nodeIds.length === 0) {
+      clearFillState();
+      return true;
+    }
+
+    const bounds = getNodesBounds(nodeIds);
+    if (bounds.width <= 0 || bounds.height <= 0 || store.width <= 0 || store.height <= 0) {
+      return false;
+    }
+
+    const currentZoom = getViewport().zoom;
+    const containZoom = containZoomForBounds(bounds, FIT_ALL_PADDING_PX);
+    const targetZoom = Math.max(
+      store.minZoom,
+      Math.min(store.maxZoom, currentZoom, containZoom),
+    );
+
+    clearFillState();
+    await setViewport(
+      targetViewportForBounds(bounds, targetZoom, FIT_ALL_PADDING_PX),
+      { duration: FIT_ALL_DURATION_MS },
+    );
+    return true;
+  }
+
   async function tryFocus(nodeId: string, mode: FocusRequestMode): Promise<boolean> {
     if (mode === 'fill-toggle' && filledNodeId === nodeId && restoreViewport) {
       return restoreFilledViewport();
@@ -143,8 +175,28 @@
     currentToken = req.token;
 
     stopPolling();
-    const nodeId = req.nodeId;
     const mode = req.mode;
+
+    if (mode === 'fit-all') {
+      void tryFitAll().then((done) => {
+        if (done) return;
+
+        pollDeadline = Date.now() + POLL_TIMEOUT_MS;
+        pollHandle = setInterval(() => {
+          if (Date.now() > pollDeadline) {
+            stopPolling();
+            return;
+          }
+          void tryFitAll().then((resolved) => {
+            if (resolved) stopPolling();
+          });
+        }, POLL_INTERVAL_MS);
+      });
+      return;
+    }
+
+    const nodeId = req.nodeId;
+    if (!nodeId) return;
 
     void tryFocus(nodeId, mode).then((done) => {
       if (done) return;
