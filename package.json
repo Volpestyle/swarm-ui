@@ -5,9 +5,6 @@
   "type": "module",
   "scripts": {
     "dev": "node scripts/generate-ui-protocol-types.mjs && vite",
-    "dev:server": "cargo run --manifest-path ../swarm-server/Cargo.toml",
-    "dev:ui": "SWARM_UI_MANAGE_DAEMON=0 bunx tauri dev",
-    "dev:ui:managed": "bunx tauri dev",
     "tauri:dev": "SWARM_UI_MANAGE_DAEMON=0 bunx tauri dev",
     "tauri:dev:managed": "bunx tauri dev",
     "build": "node scripts/generate-ui-protocol-types.mjs && vite build",
