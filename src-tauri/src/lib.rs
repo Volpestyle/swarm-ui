@@ -8,4 +8,5 @@ pub mod pty;
 pub mod swarm;
 pub mod ui_commands;
 pub mod ui_control;
+pub mod worker_log;
 pub mod writes;

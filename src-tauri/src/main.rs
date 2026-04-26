@@ -35,6 +35,7 @@ fn main() {
             swarm_ui::ui_commands::ui_deregister_offline_instances,
             swarm_ui::ui_commands::ui_set_layout,
             swarm_ui::ui_commands::ui_exit_app,
+            swarm_ui::worker_log::worker_log_read,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]

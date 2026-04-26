@@ -12,7 +12,7 @@ use hyper::client::conn::http1;
 use hyper::header::{self, HeaderValue};
 use hyper::{Method, Request};
 use hyper_util::rt::TokioIo;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use swarm_protocol::errors::ErrorPayload;
 use swarm_protocol::frames::{Frame, SubscribeFrame};
 use swarm_protocol::rpc::{
@@ -31,6 +31,16 @@ pub type DaemonWebSocket = WebSocketStream<UnixStream>;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 const STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const REQUIRED_DAEMON_CAPABILITIES: [&str; 3] =
+    ["pty.spawn.args", "pty.spawn.env", "pty.spawn.initial_input"];
+
+#[derive(Debug, Deserialize)]
+struct HealthResponse {
+    ok: bool,
+    v: u32,
+    #[serde(default)]
+    capabilities: Vec<String>,
+}
 
 pub fn socket_path() -> Result<PathBuf, String> {
     let base = swarm_db_path()?
@@ -40,8 +50,17 @@ pub fn socket_path() -> Result<PathBuf, String> {
 }
 
 pub fn ensure_running() -> Result<(), String> {
-    if daemon_socket_available() {
+    if daemon_ready() {
         return Ok(());
+    }
+
+    if !manage_daemon_enabled() {
+        return Err(format!(
+            "swarm-server is not ready and UI-managed daemon startup is disabled by SWARM_UI_MANAGE_DAEMON=0. Start it separately with `bun run dev:server`. Expected socket: {}",
+            socket_path()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|_| "~/.swarm-mcp/server/swarm-server.sock".to_owned())
+        ));
     }
 
     let launch = server_launch_plan().ok_or_else(manual_start_hint)?;
@@ -49,7 +68,7 @@ pub fn ensure_running() -> Result<(), String> {
 
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     while Instant::now() < deadline {
-        if daemon_socket_available() {
+        if daemon_ready() {
             return Ok(());
         }
         thread::sleep(STARTUP_POLL_INTERVAL);
@@ -63,11 +82,41 @@ pub fn ensure_running() -> Result<(), String> {
     ))
 }
 
-fn daemon_socket_available() -> bool {
-    let Ok(path) = socket_path() else {
-        return false;
-    };
-    std::os::unix::net::UnixStream::connect(path).is_ok()
+fn manage_daemon_enabled() -> bool {
+    let value = std::env::var("SWARM_UI_MANAGE_DAEMON").unwrap_or_default();
+    manage_daemon_enabled_from_value(&value)
+}
+
+fn manage_daemon_enabled_from_value(value: &str) -> bool {
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "no" | "off"
+    )
+}
+
+fn health_supports_required_capabilities(health: &HealthResponse) -> bool {
+    health.ok
+        && health.v == PROTOCOL_VERSION
+        && REQUIRED_DAEMON_CAPABILITIES.iter().all(|required| {
+            health
+                .capabilities
+                .iter()
+                .any(|capability| capability == required)
+        })
+}
+
+fn daemon_ready() -> bool {
+    tauri::async_runtime::block_on(async {
+        let Ok(response) =
+            send_request(Method::GET, "/health", None, Some("application/json")).await
+        else {
+            return false;
+        };
+        let Ok(health) = serde_json::from_slice::<HealthResponse>(&response) else {
+            return false;
+        };
+        health_supports_required_capabilities(&health)
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,6 +305,33 @@ mod tests {
 
         let _ = std::fs::remove_file(override_bin);
         let _ = std::fs::remove_file(manifest_path);
+    }
+
+    #[test]
+    fn health_probe_requires_direct_spawn_capabilities() {
+        assert!(health_supports_required_capabilities(&HealthResponse {
+            ok: true,
+            v: PROTOCOL_VERSION,
+            capabilities: REQUIRED_DAEMON_CAPABILITIES
+                .iter()
+                .map(|capability| capability.to_string())
+                .collect(),
+        }));
+
+        assert!(!health_supports_required_capabilities(&HealthResponse {
+            ok: true,
+            v: PROTOCOL_VERSION,
+            capabilities: Vec::new(),
+        }));
+    }
+
+    #[test]
+    fn manage_daemon_env_can_disable_auto_start() {
+        assert!(!manage_daemon_enabled_from_value("0"));
+        assert!(!manage_daemon_enabled_from_value("false"));
+        assert!(!manage_daemon_enabled_from_value("off"));
+        assert!(manage_daemon_enabled_from_value(""));
+        assert!(manage_daemon_enabled_from_value("1"));
     }
 }
 

@@ -24,6 +24,7 @@
   import { isSystemMessage } from '../lib/messages';
   import { buildTaskTree, type TaskTreeRow } from '../lib/tasks';
   import Markdown from '../lib/Markdown.svelte';
+  import WorkerLogViewer from './WorkerLogViewer.svelte';
   import {
     annotations,
     events as eventsStore,
@@ -137,6 +138,40 @@
     } catch {
       return value;
     }
+  }
+
+  // -------------------------------------------------------------------
+  // Worker log surfacing. Clanky writes a session record per worker into
+  // KV at `clanky:code_worker_session:worker:<id>`. When the worker was
+  // spawned via direct_child fallback (no swarm-server PTY), the record
+  // includes `logPath` pointing at a file we can tail through the
+  // worker_log_read Tauri command.
+  // -------------------------------------------------------------------
+
+  type WorkerLogTarget = {
+    workerId: string;
+    taskId: string | null;
+    path: string;
+  };
+
+  let openWorkerLog: WorkerLogTarget | null = null;
+
+  function parseWorkerLogTarget(entry: KvEntry): WorkerLogTarget | null {
+    if (!entry.key.startsWith('clanky:code_worker_session:worker:')) return null;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(entry.value);
+    } catch {
+      return null;
+    }
+    if (!parsed || typeof parsed !== 'object') return null;
+    const record = parsed as Record<string, unknown>;
+    const logPath = typeof record.logPath === 'string' ? record.logPath : '';
+    if (!logPath) return null;
+    const workerId = typeof record.workerId === 'string' ? record.workerId : '';
+    if (!workerId) return null;
+    const taskId = typeof record.taskId === 'string' && record.taskId ? record.taskId : null;
+    return { workerId, taskId, path: logPath };
   }
 
   // -------------------------------------------------------------------
@@ -1083,6 +1118,7 @@
           <div class="kv-list">
             {#each visibleKv as entry (kvRowKey(entry))}
               {@const expanded = isKvExpanded(entry, expandedKvKeys)}
+              {@const workerLog = parseWorkerLogTarget(entry)}
               <div class="kv-row" class:expanded>
                 <button
                   type="button"
@@ -1095,6 +1131,16 @@
                     <span class="kv-value-summary mono">{kvSummary(entry.value)}</span>
                   {/if}
                 </button>
+                {#if workerLog}
+                  <button
+                    type="button"
+                    class="kv-worker-log-btn"
+                    on:click={() => (openWorkerLog = workerLog)}
+                    title={`Tail ${workerLog.path}`}
+                  >
+                    view log
+                  </button>
+                {/if}
                 {#if expanded}
                   <pre class="kv-value-detail mono">{kvDetail(entry.value)}</pre>
                   {#if !selectedScope}
@@ -1109,6 +1155,15 @@
     {/if}
   </div>
 </div>
+
+{#if openWorkerLog}
+  <WorkerLogViewer
+    path={openWorkerLog.path}
+    workerId={openWorkerLog.workerId}
+    taskId={openWorkerLog.taskId}
+    onClose={() => (openWorkerLog = null)}
+  />
+{/if}
 
 <style>
   .inspector {
@@ -1728,6 +1783,22 @@
     color: inherit;
     font: inherit;
     overflow: hidden;
+  }
+
+  .kv-worker-log-btn {
+    margin: 0 6px 4px;
+    padding: 2px 8px;
+    background: rgba(137, 180, 250, 0.16);
+    border: 1px solid rgba(137, 180, 250, 0.45);
+    color: var(--accent, #89b4fa);
+    border-radius: 3px;
+    font-size: 10px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    cursor: pointer;
+  }
+
+  .kv-worker-log-btn:hover {
+    background: rgba(137, 180, 250, 0.28);
   }
 
   .kv-row-head:hover {
