@@ -59,6 +59,7 @@
   import ConnectionEdge from './edges/ConnectionEdge.svelte';
 
   // Panels (Agent 4)
+  import EventHistoryModal from './panels/EventHistoryModal.svelte';
   import Inspector from './panels/Inspector.svelte';
   import Launcher from './panels/Launcher.svelte';
   import MobileAccessModal from './panels/MobileAccessModal.svelte';
@@ -152,6 +153,7 @@
   let hasSelection = false;
   let showMobileAccess = false;
   let showSettings = false;
+  let showEventHistory = false;
   let showCloseConfirm = false;
   let closeRequestUnlisten: UnlistenFn | null = null;
   let appWindow: ReturnType<typeof getCurrentWindow> | null = null;
@@ -746,6 +748,25 @@
     showMobileAccess = false;
   }
 
+  let eventHistoryInitialScope: string | null = null;
+
+  function openEventHistory(scope: string | null = null) {
+    showSettings = false;
+    showMobileAccess = false;
+    eventHistoryInitialScope = scope;
+    showEventHistory = true;
+  }
+
+  function closeEventHistory() {
+    showEventHistory = false;
+  }
+
+  function handleViewFullHistory(
+    event: CustomEvent<{ scope: string | null }>,
+  ): void {
+    openEventHistory(event.detail.scope);
+  }
+
   async function triggerLaunchShortcut(): Promise<void> {
     if (!launcherRef) return;
     await launcherRef.launch();
@@ -777,7 +798,7 @@
     if (showCloseConfirm) return;
 
     const meta = event.metaKey || event.ctrlKey;
-    const overlayOpen = showSettings || showMobileAccess;
+    const overlayOpen = showSettings || showMobileAccess || showEventHistory;
 
     if (!event.defaultPrevented && !event.repeat && !event.isComposing) {
       const wantsLaunch =
@@ -1131,6 +1152,18 @@
         </button>
       </div>
       <div class="tab-actions">
+        <button
+          type="button"
+          class="icon-btn"
+          on:click={() => openEventHistory()}
+          aria-label="Event History"
+          title="Event History"
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="9"/>
+            <polyline points="12 7 12 12 15.5 14"/>
+          </svg>
+        </button>
         {#if activeTab === 'launch'}
           <button
             type="button"
@@ -1189,7 +1222,11 @@
         <Launcher bind:this={launcherRef} />
       </div>
       <div class="tab-panel" class:hidden={activeTab !== 'inspect'}>
-        <Inspector {selectedNode} {selectedEdge} />
+        <Inspector
+          {selectedNode}
+          {selectedEdge}
+          on:viewFullHistory={handleViewFullHistory}
+        />
       </div>
     </div>
   </aside>
@@ -1200,6 +1237,13 @@
 
   {#if showMobileAccess}
     <MobileAccessModal on:close={closeMobileAccess} />
+  {/if}
+
+  {#if showEventHistory}
+    <EventHistoryModal
+      initialScope={eventHistoryInitialScope}
+      on:close={closeEventHistory}
+    />
   {/if}
 
   {#if showCloseConfirm}

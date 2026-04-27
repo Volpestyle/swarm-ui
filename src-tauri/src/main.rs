@@ -36,6 +36,7 @@ fn main() {
             swarm_ui::ui_commands::ui_set_layout,
             swarm_ui::ui_commands::ui_exit_app,
             swarm_ui::worker_log::worker_log_read,
+            swarm_ui::event_history::event_history_query,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]

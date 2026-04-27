@@ -1,5 +1,6 @@
 pub mod bind;
 pub mod daemon;
+pub mod event_history;
 pub mod events;
 pub mod launch;
 pub mod mobile_access;

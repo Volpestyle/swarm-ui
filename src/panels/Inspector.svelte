@@ -7,7 +7,7 @@
   - Scrollable content area with close button to deselect
 -->
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { createEventDispatcher, onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import type {
     Annotation,
@@ -23,6 +23,20 @@
   import { formatRelative, formatTimestamp, timestampToMillis } from '../lib/time';
   import { isSystemMessage } from '../lib/messages';
   import { buildTaskTree, type TaskTreeRow } from '../lib/tasks';
+  import {
+    ACTIVITY_CATEGORIES,
+    ALL_ACTIVITY_CATEGORY_FILTER,
+    categoryOf,
+    eventColor,
+    eventDetail,
+    eventSummary,
+    formatInstanceRef,
+    formatSubject,
+    isSystemRow,
+    subjectTitle,
+    type ActivityCategoryFilter,
+    type EventCategory,
+  } from '../lib/eventFormat';
   import Markdown from '../lib/Markdown.svelte';
   import WorkerLogViewer from './WorkerLogViewer.svelte';
   import {
@@ -35,6 +49,8 @@
 
   export let selectedNode: XYFlowNode | null = null;
   export let selectedEdge: XYFlowEdge | null = null;
+
+  const dispatch = createEventDispatcher<{ viewFullHistory: { scope: string | null } }>();
 
   // Determine what we're inspecting
   $: inspectingNode = selectedNode !== null;
@@ -241,16 +257,6 @@
   // subject is one of the selected instance ids.
   // -------------------------------------------------------------------
 
-  type EventCategory = 'message' | 'task' | 'kv' | 'context' | 'instance';
-
-  const ACTIVITY_CATEGORIES: { id: EventCategory; label: string; color: string }[] = [
-    { id: 'message',  label: 'messages',  color: 'var(--edge-message, #89b4fa)' },
-    { id: 'task',     label: 'tasks',     color: 'var(--edge-task-in-progress, #f9e2af)' },
-    { id: 'kv',       label: 'kv',        color: 'var(--badge-reviewer, #a6e3a1)' },
-    { id: 'context',  label: 'context',   color: 'var(--edge-task-open, #fab387)' },
-    { id: 'instance', label: 'instances', color: '#a6adc8' },
-  ];
-
   // Heartbeat thresholds mirror the server's `STALE` / offline cutoffs in
   // src/registry.ts (30s / 60s). Used by the liveness header below.
   const STALE_AFTER_MS = 30_000;
@@ -261,9 +267,9 @@
   const EVENTS_BUFFER_CAP = 500;
 
   let activityCollapsed = false;
-  let activityFilter: Set<EventCategory> = new Set(
-    ACTIVITY_CATEGORIES.map((c) => c.id),
-  );
+  let activityFilter: Set<ActivityCategoryFilter> = new Set<ActivityCategoryFilter>([
+    ALL_ACTIVITY_CATEGORY_FILTER,
+  ]);
   let expandedEventIds = new Set<number>();
 
   // Tick driving relative-time labels and liveness staleness. Cheap reactive
@@ -284,24 +290,24 @@
     }
   });
 
-  function categoryOf(type: string): EventCategory | null {
-    if (type.startsWith('message.')) return 'message';
-    if (type.startsWith('task.')) return 'task';
-    if (type.startsWith('kv.')) return 'kv';
-    if (type.startsWith('context.')) return 'context';
-    if (type.startsWith('instance.')) return 'instance';
-    return null;
-  }
-
   function toggleCategory(cat: EventCategory): void {
-    const next = new Set(activityFilter);
+    const next = activityFilter.has(ALL_ACTIVITY_CATEGORY_FILTER)
+      ? new Set<ActivityCategoryFilter>()
+      : new Set(activityFilter);
+    next.delete(ALL_ACTIVITY_CATEGORY_FILTER);
     if (next.has(cat)) next.delete(cat);
     else next.add(cat);
-    activityFilter = next;
+    activityFilter = next.size === 0 || next.size === ACTIVITY_CATEGORIES.length
+      ? new Set<ActivityCategoryFilter>([ALL_ACTIVITY_CATEGORY_FILTER])
+      : next;
+  }
+
+  function selectAllActivityCategories(): void {
+    activityFilter = new Set<ActivityCategoryFilter>([ALL_ACTIVITY_CATEGORY_FILTER]);
   }
 
   function resetActivityFilters(): void {
-    activityFilter = new Set(ACTIVITY_CATEGORIES.map((c) => c.id));
+    selectAllActivityCategories();
   }
 
   // Selected actors: when a node is selected we narrow to its instance id;
@@ -328,7 +334,7 @@
   );
   $: scopeMatchedCount = filterEvents(
     $eventsStore,
-    new Set(ACTIVITY_CATEGORIES.map((c) => c.id)),
+    new Set<ActivityCategoryFilter>([ALL_ACTIVITY_CATEGORY_FILTER]),
     selectedScope,
     selectedActors,
   ).length;
@@ -337,15 +343,16 @@
 
   function filterEvents(
     rows: Event[],
-    chips: Set<EventCategory>,
+    chips: Set<ActivityCategoryFilter>,
     scope: string | null,
     actors: Set<string>,
   ): Event[] {
     const out: Event[] = [];
+    const includeAllCategories = chips.has(ALL_ACTIVITY_CATEGORY_FILTER);
     for (const row of rows) {
       if (scope && row.scope !== scope) continue;
       const cat = categoryOf(row.type);
-      if (!cat || !chips.has(cat)) continue;
+      if (!cat || (!includeAllCategories && !chips.has(cat))) continue;
       if (actors.size > 0) {
         const actorMatch = row.actor !== null && actors.has(row.actor);
         const subjectMatch = row.subject !== null && actors.has(row.subject);
@@ -362,217 +369,6 @@
     if (next.has(evt.id)) next.delete(evt.id);
     else next.add(evt.id);
     expandedEventIds = next;
-  }
-
-  function eventColor(type: string): string {
-    const cat = categoryOf(type);
-    if (!cat) return '#a6adc8';
-    const found = ACTIVITY_CATEGORIES.find((c) => c.id === cat);
-    return found?.color ?? '#a6adc8';
-  }
-
-  function shortId(value: string | null): string {
-    if (!value) return '';
-    return value.length > 12 ? value.slice(0, 8) : value;
-  }
-
-  function basename(path: string): string {
-    const trimmed = path.replace(/\/+$/, '');
-    const idx = trimmed.lastIndexOf('/');
-    return idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
-  }
-
-  function truncate(value: string, max: number): string {
-    return value.length > max ? `${value.slice(0, max - 1)}…` : value;
-  }
-
-  type ParsedPayload = Record<string, unknown> | null;
-
-  function parsePayload(raw: string | null): ParsedPayload {
-    if (!raw) return null;
-    try {
-      const parsed = JSON.parse(raw);
-      return parsed && typeof parsed === 'object'
-        ? (parsed as Record<string, unknown>)
-        : null;
-    } catch {
-      return null;
-    }
-  }
-
-  // Format an actor or instance-typed subject. Resolves UUIDs to instance
-  // labels via the live `instances` store; falls back to a short UUID.
-  // The literal "system" string is preserved (server-side actor for
-  // automated cascades & stale reclaims).
-  function formatInstanceRef(
-    id: string | null,
-    instMap: Map<string, Instance>,
-  ): string {
-    if (!id) return '—';
-    if (id === 'system') return 'system';
-    const inst = instMap.get(id);
-    if (inst?.label) return inst.label;
-    return shortId(id);
-  }
-
-  function formatTaskRef(id: string | null, tasks: Map<string, Task>): string {
-    if (!id) return '—';
-    const task = tasks.get(id);
-    if (task?.title) return truncate(task.title, 36);
-    return shortId(id);
-  }
-
-  // Subject formatting depends on what kind of entity the subject is for
-  // each event type. Falls back to the raw shortId for unknown types so
-  // we never silently swallow new event categories.
-  function formatSubject(
-    evt: Event,
-    instMap: Map<string, Instance>,
-    tasks: Map<string, Task>,
-  ): string {
-    if (!evt.subject) {
-      return evt.type === 'message.broadcast' ? 'broadcast' : '—';
-    }
-    if (evt.type.startsWith('instance.') || evt.type.startsWith('message.')) {
-      return formatInstanceRef(evt.subject, instMap);
-    }
-    if (evt.type.startsWith('task.')) {
-      return formatTaskRef(evt.subject, tasks);
-    }
-    if (evt.type.startsWith('context.')) {
-      return basename(evt.subject);
-    }
-    if (evt.type.startsWith('kv.')) {
-      return truncate(evt.subject, 36);
-    }
-    return shortId(evt.subject);
-  }
-
-  function subjectTitle(evt: Event): string {
-    if (!evt.subject) return '';
-    if (evt.type.startsWith('context.') || evt.type.startsWith('kv.')) {
-      return evt.subject;
-    }
-    return evt.subject;
-  }
-
-  // Per-event-type summary. Returns a compact human-readable description
-  // of the most useful payload field(s); falls back to '' rather than
-  // dumping raw JSON (the expanded view shows full payload).
-  function eventSummary(
-    evt: Event,
-    instMap: Map<string, Instance>,
-    tasks: Map<string, Task>,
-  ): string {
-    const p = parsePayload(evt.payload);
-
-    switch (evt.type) {
-      case 'message.sent': {
-        const len = typeof p?.length === 'number' ? p.length : null;
-        return len !== null ? `${len} chars` : '';
-      }
-      case 'message.broadcast': {
-        const r = typeof p?.recipients === 'number' ? p.recipients : null;
-        const len = typeof p?.length === 'number' ? p.length : null;
-        if (r === null) return '';
-        return len !== null
-          ? `→ ${r} recipient(s) · ${len} chars`
-          : `→ ${r} recipient(s)`;
-      }
-      case 'task.created': {
-        const title = typeof p?.title === 'string' ? p.title : '';
-        const status = typeof p?.status === 'string' ? p.status : '';
-        const t = typeof p?.task_type === 'string' ? `[${p.task_type}] ` : '';
-        const head = title ? truncate(title, 40) : '';
-        if (head && status) return `${t}${head} · ${status}`;
-        if (head) return `${t}${head}`;
-        if (status) return `${t}→ ${status}`;
-        return t.trim();
-      }
-      case 'task.claimed':
-        return 'claimed';
-      case 'task.updated': {
-        const status = typeof p?.status === 'string' ? p.status : '';
-        const prior = typeof p?.prior_status === 'string' ? p.prior_status : '';
-        if (prior && status) return `${prior} → ${status}`;
-        if (status) return `→ ${status}`;
-        return 'updated';
-      }
-      case 'task.approved': {
-        const status = typeof p?.status === 'string' ? p.status : '';
-        return status ? `approved → ${status}` : 'approved';
-      }
-      case 'task.cascade.unblocked': {
-        const status = typeof p?.status === 'string' ? p.status : '';
-        return status
-          ? `auto-unblocked → ${status}`
-          : 'auto-unblocked';
-      }
-      case 'task.cascade.cancelled': {
-        const reason = typeof p?.reason === 'string' ? p.reason : '';
-        const trigger =
-          typeof p?.trigger === 'string'
-            ? formatTaskRef(p.trigger, tasks)
-            : '';
-        if (reason && trigger) {
-          return `auto-cancelled · ${reason} (${trigger})`;
-        }
-        if (reason) return `auto-cancelled · ${reason}`;
-        return 'auto-cancelled';
-      }
-      case 'kv.set': {
-        const len = typeof p?.length === 'number' ? p.length : null;
-        return len !== null ? `set · ${len} bytes` : 'set';
-      }
-      case 'kv.deleted':
-        return 'deleted';
-      case 'kv.appended': {
-        const len = typeof p?.length === 'number' ? p.length : null;
-        return len !== null ? `appended · ${len} item(s)` : 'appended';
-      }
-      case 'context.annotated': {
-        const kind =
-          typeof p?.annotation_type === 'string' ? p.annotation_type : '';
-        return kind || 'annotated';
-      }
-      case 'context.lock_acquired':
-        return 'locked';
-      case 'context.lock_released': {
-        const n = typeof p?.released === 'number' ? p.released : null;
-        return n !== null && n !== 1 ? `released · ${n}` : 'released';
-      }
-      case 'instance.registered': {
-        const label = typeof p?.label === 'string' ? p.label : '';
-        const adopted = p?.adopted === true;
-        const pid = typeof p?.pid === 'number' ? `pid ${p.pid}` : '';
-        const head = adopted ? 'adopted' : 'registered';
-        const parts = [head, label, pid].filter(Boolean);
-        return parts.join(' · ');
-      }
-      case 'instance.deregistered': {
-        const label = typeof p?.label === 'string' ? p.label : '';
-        return label ? `deregistered · ${label}` : 'deregistered';
-      }
-      case 'instance.stale_reclaimed': {
-        const label = typeof p?.label === 'string' ? p.label : '';
-        return label ? `timed out · ${label}` : 'timed out';
-      }
-      default:
-        return '';
-    }
-  }
-
-  function eventDetail(evt: Event): string {
-    if (!evt.payload) return '(no payload)';
-    try {
-      return JSON.stringify(JSON.parse(evt.payload), null, 2);
-    } catch {
-      return evt.payload;
-    }
-  }
-
-  function isSystemRow(evt: Event): boolean {
-    return evt.actor === 'system' || evt.type.startsWith('task.cascade.');
   }
 
   // Liveness summary for the selected instance (single-node selection
@@ -1014,8 +810,18 @@
             </div>
           {/if}
           <div class="activity-chips">
+            <button
+              type="button"
+              class="activity-chip"
+              class:active={activityFilter.has(ALL_ACTIVITY_CATEGORY_FILTER)}
+              style:color={activityFilter.has(ALL_ACTIVITY_CATEGORY_FILTER) ? 'var(--terminal-fg, #c0caf5)' : '#6c7086'}
+              style:border-color={activityFilter.has(ALL_ACTIVITY_CATEGORY_FILTER) ? 'rgba(137, 180, 250, 0.5)' : 'rgba(108, 112, 134, 0.4)'}
+              on:click={selectAllActivityCategories}
+            >
+              all
+            </button>
             {#each ACTIVITY_CATEGORIES as cat (cat.id)}
-              {@const on = activityFilter.has(cat.id)}
+              {@const on = !activityFilter.has(ALL_ACTIVITY_CATEGORY_FILTER) && activityFilter.has(cat.id)}
               <button
                 type="button"
                 class="activity-chip"
@@ -1031,6 +837,24 @@
           {#if bufferFull}
             <div class="activity-meta">
               Showing latest {EVENTS_BUFFER_CAP} events — older entries dropped.
+              <button
+                type="button"
+                class="activity-reset"
+                on:click={() => dispatch('viewFullHistory', { scope: selectedScope })}
+              >
+                view full history
+              </button>
+            </div>
+          {:else}
+            <div class="activity-meta-actions">
+              <button
+                type="button"
+                class="activity-reset"
+                on:click={() => dispatch('viewFullHistory', { scope: selectedScope })}
+                title="Open the full event history modal with current scope"
+              >
+                view full history
+              </button>
             </div>
           {/if}
           {#if visibleEvents.length === 0}
@@ -1587,6 +1411,16 @@
     font-size: 9.5px;
     padding: 2px 0 4px 0;
     font-style: italic;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .activity-meta-actions {
+    display: flex;
+    justify-content: flex-end;
+    padding: 2px 0 4px 0;
   }
 
   .activity-liveness {
