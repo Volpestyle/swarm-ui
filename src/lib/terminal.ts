@@ -80,6 +80,11 @@ export async function createTerminal(
     allowTransparency: true,
     cursorBlink: true,
     theme: resolved.theme,
+    // ghostty-web defaults to 10k lines; long-running agents (Codex, Claude
+    // Code, etc.) blow past that quickly. Match the order of magnitude of
+    // the server's 2 MB replay buffer (~20k lines at typical widths) with
+    // headroom so PageUp/PageDown can reach session start.
+    scrollback: 100_000,
   });
 
   let disposed = false;

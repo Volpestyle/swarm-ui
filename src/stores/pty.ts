@@ -105,6 +105,26 @@ function upsertSession(session: PtySession): void {
     next.set(session.id, { ...next.get(session.id), ...session });
     return next;
   });
+
+  // Server-bound PTYs (launched via swarm-server with a prebound instance_id)
+  // carry their binding on `bound_instance_id` and arrive via pty:created /
+  // pty:updated events without ever firing `bind:resolved`. Without
+  // reconciling the bindings store here, graph.ts sees the instance and PTY
+  // as unbound and renders them as two separate cards instead of one merged
+  // "bound" node. Mirror the binding from the session's authoritative field.
+  reconcileBindingFromSession(session);
+}
+
+function reconcileBindingFromSession(session: PtySession): void {
+  bindings.update((state) => {
+    const pending = state.pending.filter(([, pid]) => pid !== session.id);
+    const filtered = state.resolved.filter(([, pid]) => pid !== session.id);
+    if (session.bound_instance_id) {
+      const next: [string, string] = [session.bound_instance_id, session.id];
+      return { pending, resolved: [...filtered, next] };
+    }
+    return { pending, resolved: filtered };
+  });
 }
 
 function patchSession(id: string, patch: Partial<PtySession>): void {

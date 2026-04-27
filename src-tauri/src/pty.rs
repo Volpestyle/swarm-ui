@@ -17,6 +17,26 @@ use crate::model::{AppError, PtySession};
 
 const BUFFER_CAPACITY: usize = 2 * 1024 * 1024;
 const STREAM_RETRY_DELAY: Duration = Duration::from_millis(500);
+const TERMINAL_PROBE_TAIL_BYTES: usize = 8;
+const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
+const CURSOR_POSITION_RESPONSE: &[u8] = b"\x1b[1;1R";
+const DEVICE_ATTRIBUTES_QUERY: &[u8] = b"\x1b[c";
+const DEVICE_ATTRIBUTES_RESPONSE: &[u8] = b"\x1b[?1;2c";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalProbe {
+    CursorPosition,
+    DeviceAttributes,
+}
+
+impl TerminalProbe {
+    fn response(self) -> &'static [u8] {
+        match self {
+            TerminalProbe::CursorPosition => CURSOR_POSITION_RESPONSE,
+            TerminalProbe::DeviceAttributes => DEVICE_ATTRIBUTES_RESPONSE,
+        }
+    }
+}
 
 #[derive(Default)]
 struct ByteRingBuffer {
@@ -53,6 +73,9 @@ struct PtyHandle {
     session: Mutex<PtySession>,
     buffer: Mutex<ByteRingBuffer>,
     last_seq: Mutex<Option<PtySeq>>,
+    probe_tail: Mutex<Vec<u8>>,
+    answered_cursor_probe: AtomicBool,
+    answered_device_attributes_probe: AtomicBool,
     exit_emitted: AtomicBool,
     closed: AtomicBool,
     stream_task: Mutex<Option<JoinHandle<()>>>,
@@ -64,6 +87,9 @@ impl PtyHandle {
             session: Mutex::new(session),
             buffer: Mutex::new(ByteRingBuffer::default()),
             last_seq: Mutex::new(None),
+            probe_tail: Mutex::new(Vec::new()),
+            answered_cursor_probe: AtomicBool::new(false),
+            answered_device_attributes_probe: AtomicBool::new(false),
             exit_emitted: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             stream_task: Mutex::new(None),
@@ -157,8 +183,43 @@ impl PtyHandle {
             .lock()
             .map_err(|_| "PTY buffer lock poisoned".to_owned())?
             .append(&data);
+        let probe_responses = self.terminal_probe_responses(&data)?;
         let _ = app_handle.emit(&pty_data_event(pty_id), data);
+        for response in probe_responses {
+            let pty_id = pty_id.to_owned();
+            tauri::async_runtime::spawn(async move {
+                if let Err(err) = daemon::write_pty(&pty_id, response).await {
+                    eprintln!("[pty] failed to answer terminal probe for {pty_id}: {err}");
+                }
+            });
+        }
         Ok(())
+    }
+
+    fn terminal_probe_responses(&self, data: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+        let probes = {
+            let mut tail = self
+                .probe_tail
+                .lock()
+                .map_err(|_| "PTY terminal probe lock poisoned".to_owned())?;
+            collect_terminal_probes(&mut tail, data)
+        };
+
+        let mut responses = Vec::new();
+        for probe in probes {
+            let already_answered = match probe {
+                TerminalProbe::CursorPosition => {
+                    self.answered_cursor_probe.swap(true, Ordering::AcqRel)
+                }
+                TerminalProbe::DeviceAttributes => self
+                    .answered_device_attributes_probe
+                    .swap(true, Ordering::AcqRel),
+            };
+            if !already_answered {
+                responses.push(probe.response().to_vec());
+            }
+        }
+        Ok(responses)
     }
 
     fn buffer_snapshot(&self) -> Result<Vec<u8>, String> {
@@ -463,6 +524,39 @@ impl PtyManager {
     }
 }
 
+fn collect_terminal_probes(tail: &mut Vec<u8>, data: &[u8]) -> Vec<TerminalProbe> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+
+    let previous_len = tail.len();
+    let mut window = Vec::with_capacity(previous_len + data.len());
+    window.extend_from_slice(tail);
+    window.extend_from_slice(data);
+
+    let mut probes = Vec::new();
+    for (needle, probe) in [
+        (CURSOR_POSITION_QUERY, TerminalProbe::CursorPosition),
+        (DEVICE_ATTRIBUTES_QUERY, TerminalProbe::DeviceAttributes),
+    ] {
+        if window.len() < needle.len() {
+            continue;
+        }
+        for start in 0..=window.len() - needle.len() {
+            let end = start + needle.len();
+            if end > previous_len && &window[start..end] == needle {
+                probes.push(probe);
+            }
+        }
+    }
+
+    let keep = TERMINAL_PROBE_TAIL_BYTES.min(window.len());
+    tail.clear();
+    tail.extend_from_slice(&window[window.len() - keep..]);
+
+    probes
+}
+
 fn protocol_to_session(info: &PtyInfo) -> PtySession {
     PtySession {
         id: info.id.clone(),
@@ -533,4 +627,64 @@ pub fn pty_get_buffer(
 #[tauri::command]
 pub fn get_pty_sessions(manager: State<'_, PtyManager>) -> Result<Vec<PtySession>, AppError> {
     manager.sessions_snapshot()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_session() -> PtySession {
+        PtySession {
+            id: "pty-test".to_owned(),
+            command: "codex".to_owned(),
+            cwd: "/tmp".to_owned(),
+            started_at: 1,
+            exit_code: None,
+            bound_instance_id: None,
+            launch_token: None,
+            cols: 80,
+            rows: 24,
+            lease: None,
+        }
+    }
+
+    #[test]
+    fn terminal_probe_detection_handles_split_sequences() {
+        let mut tail = Vec::new();
+        assert!(collect_terminal_probes(&mut tail, b"hello\x1b[").is_empty());
+        assert_eq!(
+            collect_terminal_probes(&mut tail, b"6nworld"),
+            vec![TerminalProbe::CursorPosition]
+        );
+    }
+
+    #[test]
+    fn terminal_probe_detection_handles_device_attributes() {
+        let mut tail = Vec::new();
+        assert_eq!(
+            collect_terminal_probes(&mut tail, b"\x1b[c"),
+            vec![TerminalProbe::DeviceAttributes]
+        );
+    }
+
+    #[test]
+    fn pty_handle_answers_each_startup_probe_once() {
+        let handle = PtyHandle::new(test_session());
+        assert_eq!(
+            handle
+                .terminal_probe_responses(b"\x1b[6n\x1b[c")
+                .expect("probe detection should work"),
+            vec![
+                CURSOR_POSITION_RESPONSE.to_vec(),
+                DEVICE_ATTRIBUTES_RESPONSE.to_vec()
+            ]
+        );
+        assert!(
+            handle
+                .terminal_probe_responses(b"\x1b[6n\x1b[c")
+                .expect("probe detection should work")
+                .is_empty(),
+            "startup probes should only be answered by the headless responder once"
+        );
+    }
 }
