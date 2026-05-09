@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
-    model::{GraphPosition, INSTANCE_STALE_AFTER_SECS, SavedLayout},
+    model::{GraphPosition, INSTANCE_OFFLINE_AFTER_SECS, SavedLayout},
     swarm::swarm_db_path,
 };
 
@@ -455,7 +455,7 @@ pub struct PendingInstance {
 /// `SWARM_MCP_INSTANCE_ID=<id>` and adopt this row (flipping `adopted = 1`).
 /// Until then, the UI keeps the row's `heartbeat` fresh via
 /// [`heartbeat_unadopted_instance`] so it stays visible and is not pruned
-/// by the Bun side's 30s stale sweep.
+/// by the Bun side's 60s offline reclaim.
 pub fn create_pending_instance(
     conn: &Connection,
     directory: &str,
@@ -595,13 +595,13 @@ pub fn deregister_instance(conn: &Connection, instance_id: &str) -> Result<(), S
     Ok(())
 }
 
-/// Delete stale unadopted instance rows left behind by prior UI sessions.
+/// Delete offline unadopted instance rows left behind by prior UI sessions.
 ///
 /// Fresh placeholders may still belong to another live `swarm-ui` window or a
 /// slow-starting child process, so we only sweep rows whose heartbeat has
-/// already fallen past the normal stale window.
+/// already fallen past the normal offline reclaim window.
 pub fn sweep_unadopted_orphans(conn: &Connection) -> Result<usize, String> {
-    let stale_before = now_secs().saturating_sub(INSTANCE_STALE_AFTER_SECS);
+    let stale_before = now_secs().saturating_sub(INSTANCE_OFFLINE_AFTER_SECS);
 
     // Collect ids first so we can cascade tasks/locks/messages per id.
     let mut stmt = conn
@@ -1210,7 +1210,7 @@ mod tests {
         // Two stale orphans + one adopted instance.
         let orphan_a = create_pending_instance(&conn, "/tmp", Some("s"), None, None).unwrap();
         let orphan_b = create_pending_instance(&conn, "/tmp", Some("s"), None, None).unwrap();
-        let stale_heartbeat = now_secs() - INSTANCE_STALE_AFTER_SECS - 1;
+        let stale_heartbeat = now_secs() - INSTANCE_OFFLINE_AFTER_SECS - 1;
         conn.execute(
             "UPDATE instances SET heartbeat = ? WHERE id IN (?, ?)",
             params![stale_heartbeat, orphan_a.id, orphan_b.id],
