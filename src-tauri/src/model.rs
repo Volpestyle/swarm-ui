@@ -4,8 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use swarm_protocol::state::{INSTANCE_OFFLINE_AFTER_SECS, INSTANCE_STALE_AFTER_SECS};
 pub use swarm_protocol::{
-    Annotation, Event, Instance, InstanceStatus, KvEntry, Lease, Lock, Message, Task, TaskStatus,
-    TaskType,
+    Event, Instance, InstanceStatus, KvEntry, Lease, Lock, Message, Task, TaskStatus, TaskType,
 };
 
 // ---------------------------------------------------------------------------
@@ -92,10 +91,6 @@ pub struct SwarmUpdate {
     pub messages: Vec<Message>,
     #[serde(default)]
     pub locks: Vec<Lock>,
-    /// All `context` rows including locks. The frontend groups by `type` to
-    /// surface findings/warnings/bugs/notes/todos alongside locks.
-    #[serde(default)]
-    pub annotations: Vec<Annotation>,
     #[serde(default)]
     pub kv: Vec<KvEntry>,
     /// Last N events from the audit log — seeds the Activity timeline on

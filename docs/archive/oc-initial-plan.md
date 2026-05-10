@@ -201,7 +201,7 @@ Right-side inspector for:
 
 - full message history
 - task details
-- file annotations and locks
+- file locks
 - instance metadata
 - launch parameters
 

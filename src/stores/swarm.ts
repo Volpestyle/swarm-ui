@@ -16,7 +16,6 @@ import type {
   Task,
   Message,
   Lock,
-  Annotation,
   KvEntry,
   Event,
   SwarmUpdate,
@@ -47,7 +46,6 @@ const rawInstances = writable<Map<string, Instance>>(new Map());
 const rawTasks = writable<Map<string, Task>>(new Map());
 const rawMessages = writable<Message[]>([]);
 const rawLocks = writable<Lock[]>([]);
-const rawAnnotations = writable<Annotation[]>([]);
 const rawKvEntries = writable<KvEntry[]>([]);
 const rawEvents = writable<Event[]>([]);
 
@@ -68,7 +66,6 @@ export const availableScopes: Readable<string[]> = derived(
     rawTasks,
     rawMessages,
     rawLocks,
-    rawAnnotations,
     rawKvEntries,
     rawEvents,
   ],
@@ -77,7 +74,6 @@ export const availableScopes: Readable<string[]> = derived(
     $tasks,
     $messages,
     $locks,
-    $annotations,
     $kvEntries,
     $events,
   ]) => {
@@ -86,7 +82,6 @@ export const availableScopes: Readable<string[]> = derived(
     for (const task of $tasks.values()) scopes.add(task.scope);
     for (const msg of $messages) scopes.add(msg.scope);
     for (const lock of $locks) scopes.add(lock.scope);
-    for (const annotation of $annotations) scopes.add(annotation.scope);
     for (const entry of $kvEntries) scopes.add(entry.scope);
     for (const evt of $events) scopes.add(evt.scope);
     return [...scopes].filter(Boolean).sort();
@@ -165,19 +160,6 @@ export const locks: Readable<Lock[]> = derived(
   [rawLocks, activeScope],
   ([$locks, $scope]) =>
     $scope === null ? $locks : $locks.filter((lock) => lock.scope === $scope),
-);
-
-/**
- * All `context` rows including locks. Non-lock types (finding, warning,
- * bug, note, todo) are rendered alongside locks in the Inspector's
- * "Context" section so agent annotations are visible.
- */
-export const annotations: Readable<Annotation[]> = derived(
-  [rawAnnotations, activeScope],
-  ([$annotations, $scope]) =>
-    $scope === null
-      ? $annotations
-      : $annotations.filter((annotation) => annotation.scope === $scope),
 );
 
 /**
@@ -572,9 +554,6 @@ function applyUpdate(update: SwarmUpdate): void {
 
   // Locks: full replacement
   rawLocks.set(update.locks);
-
-  // Annotations: full replacement (includes locks)
-  rawAnnotations.set(update.annotations ?? []);
 
   // KV entries: full replacement
   rawKvEntries.set(update.kv ?? []);

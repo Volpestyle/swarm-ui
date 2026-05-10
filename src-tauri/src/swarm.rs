@@ -445,7 +445,6 @@ fn protocol_to_ui_update(protocol: &ProtocolSnapshot, ui_meta: Option<Value>) ->
         tasks: protocol.tasks.clone(),
         messages: protocol.messages.clone(),
         locks: protocol.locks.clone(),
-        annotations: protocol.annotations.clone(),
         kv: protocol.kv.clone(),
         events: protocol.events.clone(),
         ui_meta,
@@ -493,16 +492,6 @@ fn apply_delta_table(snapshot: &mut ProtocolSnapshot, delta: &DeltaTableFrame) -
             apply_keyed_delta(&mut snapshot.locks, upserts, removes, |lock| LockKey {
                 scope: lock.scope.clone(),
                 file: lock.file.clone(),
-            })
-        }
-        DeltaTableFrame::Annotations {
-            cursor,
-            upserts,
-            removes,
-        } => {
-            snapshot.cursors.annotations = Some(cursor.clone());
-            apply_string_key_delta(&mut snapshot.annotations, upserts, removes, |annotation| {
-                annotation.id.clone()
             })
         }
         DeltaTableFrame::Kv {

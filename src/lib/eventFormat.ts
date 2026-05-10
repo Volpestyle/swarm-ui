@@ -220,13 +220,6 @@ export function eventSummary(
       const head = len !== null ? `appended · now ${len} item(s)` : 'appended';
       return preview ? `${head} · ${preview}` : head;
     }
-    case 'context.annotated': {
-      const kind =
-        typeof p?.annotation_type === 'string' ? p.annotation_type : '';
-      const content = typeof p?.content === 'string' ? p.content : '';
-      const head = kind || 'annotated';
-      return content ? `${head} · ${truncate(content, 80)}` : head;
-    }
     case 'context.lock_acquired': {
       const content = typeof p?.content === 'string' ? p.content : '';
       return content ? `locked · ${truncate(content, 80)}` : 'locked';

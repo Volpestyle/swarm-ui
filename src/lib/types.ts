@@ -8,7 +8,6 @@
 
 import type { Edge as FlowEdge, Node as FlowNode } from '@xyflow/svelte';
 import type {
-  Annotation,
   Event,
   Instance,
   InstanceStatus,
@@ -21,7 +20,6 @@ import type {
 } from './generated/protocol';
 
 export type {
-  Annotation,
   Event,
   Instance,
   InstanceStatus,
@@ -89,7 +87,6 @@ export interface SwarmUpdate {
   tasks: Task[];
   messages: Message[];
   locks: Lock[];
-  annotations: Annotation[];
   kv: KvEntry[];
   events: Event[];
   ui_meta: Record<string, unknown> | null;

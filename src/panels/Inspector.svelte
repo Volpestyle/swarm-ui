@@ -10,7 +10,6 @@
   import { createEventDispatcher, onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import type {
-    Annotation,
     Event,
     Instance,
     KvEntry,
@@ -40,7 +39,6 @@
   import Markdown from '../lib/Markdown.svelte';
   import WorkerLogViewer from './WorkerLogViewer.svelte';
   import {
-    annotations,
     events as eventsStore,
     kvEntries,
     instances,
@@ -188,67 +186,6 @@
     if (!workerId) return null;
     const taskId = typeof record.taskId === 'string' && record.taskId ? record.taskId : null;
     return { workerId, taskId, path: logPath };
-  }
-
-  // -------------------------------------------------------------------
-  // Context (annotations) section. When a node is selected, filter to
-  // rows where instance_id === node.instance.id; otherwise filter by
-  // selected scope, falling back to all entries.
-  // -------------------------------------------------------------------
-
-  $: visibleAnnotations = filterAnnotations(
-    $annotations,
-    nodeData?.instance?.id ?? null,
-    selectedScope,
-  );
-  $: annotationsByType = groupAnnotationsByType(visibleAnnotations);
-  $: annotationTypeOrder = orderTypes([...annotationsByType.keys()]);
-
-  function filterAnnotations(
-    rows: Annotation[],
-    instanceId: string | null,
-    scope: string | null,
-  ): Annotation[] {
-    if (instanceId) return rows.filter((a) => a.instance_id === instanceId);
-    if (scope) return rows.filter((a) => a.scope === scope);
-    return rows;
-  }
-
-  function groupAnnotationsByType(rows: Annotation[]): Map<string, Annotation[]> {
-    const map = new Map<string, Annotation[]>();
-    for (const row of rows) {
-      const group = map.get(row.type);
-      if (group) group.push(row);
-      else map.set(row.type, [row]);
-    }
-    return map;
-  }
-
-  // Lock first (it's the high-frequency type), then everything else
-  // alphabetically so the section stays predictable as new types appear.
-  function orderTypes(types: string[]): string[] {
-    const known = ['lock', 'finding', 'warning', 'bug', 'todo', 'note'];
-    const seen = new Set(types);
-    const ordered: string[] = [];
-    for (const t of known) {
-      if (seen.has(t)) {
-        ordered.push(t);
-        seen.delete(t);
-      }
-    }
-    return [...ordered, ...[...seen].sort()];
-  }
-
-  function annotationTypeColor(type: string): string {
-    switch (type) {
-      case 'lock': return 'var(--status-stale, #f9e2af)';
-      case 'finding': return 'var(--edge-message, #89b4fa)';
-      case 'warning': return 'var(--status-stale, #f9e2af)';
-      case 'bug': return 'var(--edge-task-failed, #f38ba8)';
-      case 'todo': return 'var(--edge-task-open, #fab387)';
-      case 'note': return '#a6adc8';
-      default: return '#a6adc8';
-    }
   }
 
   // -------------------------------------------------------------------
@@ -740,46 +677,6 @@
       </div>
     {/if}
 
-    {#if visibleAnnotations.length > 0}
-      <section class="context-section">
-        <h4>
-          Context ({visibleAnnotations.length}{nodeData?.instance ? '' : selectedScope ? '' : ' · all scopes'})
-        </h4>
-        <div class="annotation-groups">
-          {#each annotationTypeOrder as type (type)}
-            {@const rows = annotationsByType.get(type) ?? []}
-            <div class="annotation-group">
-              <div class="annotation-group-head">
-                <span
-                  class="type-chip"
-                  style:color={annotationTypeColor(type)}
-                  style:border-color={annotationTypeColor(type)}
-                >
-                  {type}
-                </span>
-                <span class="annotation-group-count">{rows.length}</span>
-              </div>
-              <div class="annotation-list">
-                {#each rows as ann (ann.id)}
-                  <div class="annotation-item">
-                    {#if type === 'lock'}
-                      <div class="annotation-file mono" title={ann.file}>{ann.file}</div>
-                    {:else}
-                      <div class="annotation-meta">
-                        <span class="annotation-file mono" title={ann.file}>{ann.file}</span>
-                        <span class="annotation-time">{formatTimestamp(ann.created_at)}</span>
-                      </div>
-                      <div class="annotation-content"><Markdown content={ann.content} /></div>
-                    {/if}
-                  </div>
-                {/each}
-              </div>
-            </div>
-          {/each}
-        </div>
-      </section>
-    {/if}
-
     {#if $eventsStore.length > 0}
       <section class="activity-section">
         <button
@@ -1160,87 +1057,6 @@
     border-bottom: none;
   }
 
-  .annotation-groups {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-
-  .annotation-group {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  .annotation-group-head {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .annotation-group-count {
-    color: #6c7086;
-    font-size: 10px;
-  }
-
-  .type-chip {
-    display: inline-block;
-    border: 1px solid;
-    border-radius: 3px;
-    padding: 1px 6px;
-    font-size: 9.5px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    background: transparent;
-  }
-
-  .annotation-list {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  .annotation-item {
-    padding: 3px 0;
-    font-size: 11px;
-    border-bottom: 1px solid rgba(108, 112, 134, 0.1);
-  }
-
-  .annotation-item:last-child {
-    border-bottom: none;
-  }
-
-  .annotation-meta {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-    margin-bottom: 2px;
-  }
-
-  .annotation-file {
-    color: #a6adc8;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    flex: 1;
-    min-width: 0;
-  }
-
-  .annotation-time {
-    color: #6c7086;
-    font-size: 10px;
-    flex-shrink: 0;
-  }
-
-  .annotation-content {
-    color: #cdd6f4;
-    font-size: 11px;
-    line-height: 1.4;
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-
   .message-list {
     display: flex;
     flex-direction: column;
@@ -1339,7 +1155,6 @@
     padding: 20px 0;
   }
 
-  .context-section,
   .kv-section,
   .activity-section {
     margin-top: 4px;

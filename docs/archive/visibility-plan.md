@@ -21,7 +21,7 @@ What's missing — the gaps this plan closes:
 | Gap | Where it lives today | Today's UX |
 |--|--|--|
 | Non-`ui/*` KV entries | `kv` table | Invisible |
-| Annotations (findings/warnings/bugs/todos/notes) | `context` table, `type != 'lock'` | Invisible — only `lock` rows are loaded |
+| Legacy non-lock file notes | `context` table, `type != 'lock'` | Removed from the product direction |
 | Auto / system messages | `messages` table, `sender='system'` or `[auto]` / `[signal:*]` prefix | Look identical to peer messages |
 | Parent/subtask hierarchy | `tasks.parent_task_id` | Column selected in Rust, never rendered |
 | Task cascades | Computed on the fly in `src/tasks.ts` — no persisted event | Only the final state is visible |
@@ -30,7 +30,7 @@ What's missing — the gaps this plan closes:
 
 The fix, in three tiers:
 
-- **Tier 1** — surface the two data sources that already exist in the DB but aren't queried: non-`ui/*` KV entries, and non-lock annotations. Highest impact, smallest change.
+- **Tier 1** — surface non-`ui/*` KV entries. The earlier non-lock file-note idea was removed from the product direction.
 - **Tier 2** — distinguishability: badge system messages, render parent/subtask trees.
 - **Tier 3** — event stream: new `events` table in swarm-mcp + activity-timeline panel + graph-level signals (lock badges on nodes, edge flashes on message sends).
 
@@ -85,32 +85,9 @@ Use the `swarm-mcp` CLI (see `docs/cli.md` in repo root, or `skills/swarm-mcp/re
 
 **Out of scope.** Editing KV from the UI. Historical KV diffs (that's Tier 3). Per-instance attribution (the underlying primitive doesn't store it).
 
-## Slice 1B — Annotations panel
+## Slice 1B — Legacy non-lock file-note panel
 
-**Goal.** Show non-lock annotations (`finding`, `warning`, `bug`, `note`, `todo`) alongside locks, per file and per instance.
-
-**Backend (`src-tauri/src/swarm.rs:430`):**
-
-1. Widen `load_locks` into `load_context`: drop the `WHERE type = 'lock'` clause, select all context rows. Rename the result to `Annotation` (or similar) with fields `{ id, scope, instance_id, file, type: String, content, created_at }`.
-2. Rename `Lock` -> `Annotation` in `model.rs`, or keep `Lock` as a lightweight derived view and add a new `Annotation` struct. Recommend the latter — keep the `locks` field on `SwarmUpdate` for backward compat and add a new `annotations` field with the full set.
-3. Bump the watermark query to include `MAX(created_at)` from `context` so new annotations (not just locks) invalidate the cache. Check `Watermarks` around line 53 — there's already a task/message watermark; add a `context_max_created_at`.
-
-**Frontend:**
-
-1. `Annotation` type in `src/lib/types.ts`.
-2. `annotations` store in `src/stores/swarm.ts`.
-3. Extend the existing "File Locks" section in `Inspector.svelte:226` into a "Context" section with sub-groups by `type`. Use icons/chips to distinguish types. Locks render as today; other types render with `file`, `instance_id`, `created_at`, and `content`.
-4. When a node is selected, filter to rows where `instance_id === node.id`. When no node selected, show all for the current scope.
-
-**Acceptance.** `swarm-mcp` doesn't yet expose annotate; use the MCP server in a live session OR insert directly via sqlite for testing:
-
-```sh
-sqlite3 ~/.swarm-mcp/swarm.db "INSERT INTO context (id, scope, instance_id, file, type, content) VALUES ('test-1', '<scope>', '<inst>', '/tmp/foo.ts', 'finding', 'NPE on line 42')"
-```
-
-The "Context" section shows the finding within 500ms. Locks continue to work identically.
-
-**Out of scope.** Editing/deleting annotations from the UI. Search (already exists as an MCP tool, but UI search is Tier 3).
+This slice was intentionally dropped. Durable findings now belong in task results, follow-up tasks, tracker comments, docs, or tests. Live collision state stays as file locks.
 
 ---
 
@@ -180,7 +157,7 @@ CREATE TABLE IF NOT EXISTS events (
                                     -- 'task.cascade.unblocked', 'task.cascade.cancelled',
                                     -- 'task.approved', 'task.rejected',
                                     -- 'kv.set', 'kv.deleted',
-                                    -- 'context.annotated', 'context.lock_acquired', 'context.lock_released',
+                                    -- 'context.lock_acquired', 'context.lock_released',
                                     -- 'instance.registered', 'instance.deregistered', 'instance.stale_reclaimed'
   actor TEXT,                      -- instance_id or 'system'
   subject TEXT,                    -- task_id, key, file, recipient_id, etc.
@@ -200,7 +177,7 @@ CREATE INDEX events_created_at_idx ON events(created_at);
 | `src/messages.ts` | `send`, `broadcast` | `message.sent`, `message.broadcast` |
 | `src/tasks.ts` | `request`, `claim`, `update`, `approve`, `processCompletion`, `processFailure` | `task.created`, `task.claimed`, `task.updated`, `task.approved`/`rejected`, `task.cascade.unblocked`, `task.cascade.cancelled` |
 | `src/kv.ts` | `set`, `del`, `append` | `kv.set`, `kv.deleted`, `kv.appended` |
-| `src/context.ts` | `annotate`, `lock`, `clearLocks` | `context.annotated`, `context.lock_acquired`, `context.lock_released` |
+| `src/context.ts` | `lock`, `clearLocks` | `context.lock_acquired`, `context.lock_released` |
 | `src/registry.ts` | `register`, `deregister`, `prune` | `instance.registered`, `instance.deregistered`, `instance.stale_reclaimed` |
 
 **Actor attribution.** Most primitives already take `instance_id` as an arg — pass it through. KV mutations don't have an actor today (underlying primitive is scope-scoped) — take it as an optional param from the MCP tool handler (which does know `instance.id`) and from `cmd.ts` (which resolves via `resolveIdentity`). Default to NULL if missing.
@@ -234,7 +211,7 @@ CREATE INDEX events_created_at_idx ON events(created_at);
 
 **Goal.** Make coordination visible at a glance without opening the Inspector.
 
-1. **Lock badge on nodes** (`src/nodes/TerminalNode.svelte` / `NodeHeader.svelte`). If the node's instance holds any locks, show a lock icon with a count. Hover tooltip lists files. Data already available via the `locks` store; after 1B, use `annotations` filtered to `type='lock'`.
+1. **Lock badge on nodes** (`src/nodes/TerminalNode.svelte` / `NodeHeader.svelte`). If the node's instance holds any locks, show a lock icon with a count. Hover tooltip lists files. Data already available via the `locks` store.
 2. **Edge flash on message send.** Hook the `swarm:events:new` handler: when a `message.sent` or `message.broadcast` arrives, trigger a transient highlight on the corresponding edge in `ConnectionEdge.svelte`. The edge already animates packets from the snapshot; this adds a real-time pulse tied to the event.
 3. **KV change ripple** (optional). When `kv.set` fires for a scope-shared key, briefly highlight the scope's background to signal "something changed."
 
@@ -271,7 +248,7 @@ CREATE INDEX events_created_at_idx ON events(created_at);
 - 1A and 1B are independent — can run in parallel.
 - 2A depends on nothing; 2B depends on nothing (data already comes across).
 - 3A blocks 3B and 3C.
-- 3C partially depends on 1B (for the richer lock data after annotations land).
+- 3C can use the `locks` store directly.
 
 A sensible merge order: 1A → 1B → 2A → 2B → 3A → 3B → 3C. A two-agent split could do {1A, 2A} and {1B, 2B} in parallel, then one agent does Tier 3 serially.
 
@@ -280,7 +257,7 @@ A sensible merge order: 1A → 1B → 2A → 2B → 3A → 3B → 3C. A two-agen
 - Who is in the swarm and are they live.
 - What they are working on (tasks + parent/child).
 - What they are saying to each other (messages, distinguishing peer vs system).
-- What shared state they are coordinating through (KV + annotations + locks).
+- What shared state they are coordinating through (KV + locks).
 - What just happened (activity feed, including cascades).
 - At a glance: who holds locks and who's actively sending messages (graph signals).
 
